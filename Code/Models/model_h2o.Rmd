@@ -1,0 +1,751 @@
+---
+title: "SF Bikeshare Status - Modeling With H2O"
+output: html_notebook
+---
+
+
+  
+**NOTE:** before running this chunk, the AWS Instance Type was switched from t2.micro to t3.2xlarge.
+
+
+## Setup    
+  Load the relevant libraries.
+```{r}
+
+# {r, message=FALSE, warning=FALSE}
+# rm(list = ls())
+# .rs.restartR()
+
+library("tidyverse")
+# install.packages("data.table")
+library("data.table")
+library("rsample")
+# library("lubridate")
+# install.packages("timetk")
+# library("timetk")
+# library("DBI")
+# install.packages("RSQLite")
+# library("RSQLite")
+# install.packages("rJava")
+# library("rJava")
+# install.packages("h2o")
+library("h2o")
+# install.packages("tibble")
+library("furrr")
+library("glue")
+# install.packages("reticulate")
+library("reticulate")
+
+```
+  
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+
+
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+  
+    
+## Setup for running processes (i.e. models) in parallel on EC2.  
+  
+ Basic info needed for the setup.
+```{r}
+# # A t3.2xlarge AWS instance
+# # Created from http://www.louisaslett.com/RStudio_AMI/
+# public_ip <- "34.229.223.90"
+# 
+# # This is where my pem file lives (password file to connect).
+# ssh_private_key_file <- "/home/rstudio/Dropbox/_AWS/Dot_Pem/LouisAslett_AMI_Key_Pair.pem"
+```
+  
+    
+  Make the cluster.
+```{r}
+# cl <- makeClusterPSOCK(
+#   
+#   # Public IP number of EC2 instance
+#   workers = public_ip,
+#   
+#   # User name (always 'ubuntu')
+#   user = "ubuntu",
+#   
+#   # Use private SSH key registered with AWS
+#   rshopts = c(
+#     "-o", "StrictHostKeyChecking=no",
+#     "-o", "IdentitiesOnly=yes",
+#     "-i", ssh_private_key_file
+#   ),
+#   
+#   # Set up .libPaths() for the 'ubuntu' user and
+#   # install furrr
+#   rscript_args = c(
+#     "-e", shQuote("local({p <- Sys.getenv('R_LIBS_USER'); dir.create(p, recursive = TRUE, showWarnings = FALSE); .libPaths(p)})"),
+#     "-e", shQuote("install.packages(c('furrr', 'h2o'))")
+#   ),
+#   
+#   # Switch this to TRUE to see the code that is run on the workers without
+#   # making the connection
+#   dryrun = FALSE
+# )
+# 
+# cl
+```
+
+
+```{r}
+# boto <- import("boto3")
+# 
+# # Import EC2 client
+# ec2 <- boto$client('ec2')
+# ec2
+```
+
+
+
+```{r}
+# h2o.makeEC2ClusterPsock <-
+#   function(public_ip, ssh_private_key_file, max_mem_size = "10g", dryrun = F, h2o = T){
+# 
+#   if(h2o){
+#     r_command <- c(
+#       "-e", shQuote(".libPaths('/home/rstudio/R/x86_64-pc-linux-gnu-library/3.5')"),
+#       "-e", shQuote(glue("if (!require('furrr')) install.packages('furrr');library(h2o);system('pkill java');h2o.init(nthreads = -1, max_mem_size = '{max_mem_size}');h2o.removeAll();gc()"))
+#     )
+#   } else {
+#     r_command <- c(
+#       "-e", shQuote(".libPaths('/home/rstudio/R/x86_64-pc-linux-gnu-library/3.5')"),
+#       "-e", shQuote("if (!require('furrr')) install.packages('furrr')")
+#     )
+#    }
+# 
+#   makeClusterPSOCK(
+# 
+#     # Public IP number of EC2 instance
+#     workers = public_ip,
+# 
+#     # User name (always 'ubuntu')
+#     user = "ubuntu",
+# 
+#     # Use private SSH key registered with AWS
+#     # rshcmd = c("plink", "-ssh", "-i", ssh_private_key_file),
+#     rshopts = c(
+#     "-o", "StrictHostKeyChecking=no",
+#     "-o", "IdentitiesOnly=yes",
+#     "-i", ssh_private_key_file
+#   ),
+# 
+#     # Check available memory
+#     # Set up .libPaths() for the 'ubuntu' user and
+#     # install furrr
+#     rscript_args = r_command,
+# 
+#     # Switch this to TRUE to see the code that is run on the workers without
+#     # making the connection
+#     dryrun = dryrun, 
+#     verbose = T
+#   )
+# }
+```
+
+
+```{r}
+# time_start <- proc.time()
+# 
+# plan(cluster, workers = cl)
+# 
+# cars2_mod_future <- mtcars %>%
+#   split(.$gear) %>%
+#   future_map(~lm(mpg ~ cyl + hp + wt, data = .))
+#   # map(~lm(mpg ~ cyl + hp + wt, data = .))
+# 
+# time_end <- proc.time()
+# 
+# time_end - time_start
+# 
+# rm(time_start, time_end)
+```
+
+
+## Modeling  
+  
+  Get the base dataset.
+```{r}
+# id_split <-
+#   read_rds(path = paste0(wd,
+#                          "/Data/Interim/",
+#                          "id_split.rds"
+#                          )
+#            )
+# pmap(.l = list(a = id_split,
+#                b = names(id_split)
+#                ),
+#      .f = function(a, b) {
+#        message(b)
+#        
+#        str(a)
+#        }
+#      )
+# View(id_split$`10` %>% head(1000))
+
+lmtd_vars_lag3 <- lmtd_vars_lag3 %>% 
+  map(~select(.x,
+              station_id:minute.55
+              )
+      )
+
+names(lmtd_vars_lag3)
+lmtd_vars_lag3$`10` %>% class()
+lmtd_vars_lag3$`10` %>% glimpse()
+
+```
+  
+    
+  Create splits for modeling.
+```{r}
+
+# period_train <- 6 * 24 * 365 * 1.5 # 1.5 years of training
+# period_test  <- 6 * 24 * 365 * 0.5 # 0.5 year of training
+# skip_span     <- 6 * 24 * 75 # produces 10 splits
+# # period_train <- (6 * 24 * 365 * 1) # 1.0 years of training data
+# # period_test <- (6 * 24 * 365 * 0.5) # 0.5 years of testing data
+# # skip_span <- (6 * 24 * 50) # gives 10 evenly distributed  splits
+# 
+# rolling_origin_resamples <- 
+#   lmtd_vars_lag3 %>% 
+#   map(~rolling_origin(.x,
+#                       initial    = period_train,
+#                       assess     = period_test,
+#                       cumulative = FALSE,
+#                       skip       = skip_span
+#                       )
+#       )
+# 
+# rolling_origin_resamples %>% map(~nrow(.x))
+# 
+# rolling_origin_resamples <- rolling_origin_resamples[1:2]
+# 
+# names(rolling_origin_resamples)
+# rolling_origin_resamples$`10`$splits[[10]] %>% analysis() %>% class()
+# rolling_origin_resamples$`10`$splits[[10]] %>% analysis() %>% glimpse()
+
+```
+  
+
+# Run a h2o::h2o.automl for each split for each station_id.
+
+```{r}
+
+train_data <-
+  lmtd_vars_lag3 %>% 
+  map(~filter(.x, data_type == "01_train"))
+
+
+num_rows <- train_data %>% map(~nrow(.x))
+splt_pt_train <- num_rows %>% map(~round((.x * 0.70), digits = 0))
+splt_pt_valid <- num_rows %>% map(~round((.x * 0.85), digits = 0))
+
+
+tbl_train <-
+  pmap(.l = list(a = train_data,
+                 b = splt_pt_train
+                 ),
+       .f = function(a, b) {
+         dat = a[1:b, ] %>% 
+           select(-station_id,
+                  -data_type,
+                  -time_rnd,
+                  -row_num
+                  )
+         }
+       )
+
+tbl_valid <-
+  pmap(.l = list(a = train_data,
+                 b = splt_pt_train,
+                 c = splt_pt_valid
+                 ),
+       .f = function(a, b, c) {
+         dat = a[(b + 1):c, ] %>% 
+           select(-station_id,
+                  -data_type,
+                  -time_rnd,
+                  -row_num
+                  )
+         }
+       )
+
+tbl_test <-
+  pmap(.l = list(a = train_data,
+                 b = splt_pt_valid,
+                 c = num_rows
+                 ),
+       .f = function(a, b, c) {
+         dat = a[(b + 1):c, ] %>% 
+           select(-station_id,
+                  -data_type,
+                  -time_rnd,
+                  -row_num
+                  )
+         }
+       )
+
+
+rm(num_rows, splt_pt_train, splt_pt_valid)
+
+
+# valid_data is what will be used to compare all model types
+valid_data <-
+  lmtd_vars_lag3 %>% 
+  map(~filter(.x, data_type == "02_valid") %>% 
+        select(-station_id,
+               -data_type,
+               -time_rnd,
+               -row_num
+               )
+      )
+
+```
+  
+    
+  Start h2o.
+```{r}
+
+h2o.init()
+h2o.no_progress() # Turn off progress bars
+
+```
+  
+    
+  Convert to the datasets to h2o objects.
+```{r}
+
+train_h2o <- tbl_train %>% map(~as.h2o(.x))
+valid_h2o <- tbl_valid %>% map(~as.h2o(.x))
+test_h2o  <- tbl_test %>% map(~as.h2o(.x))
+
+valid_data_h2o  <- valid_data %>% map(~as.h2o(.x))
+
+
+# rm(tbl_train, tbl_valid, tbl_test)
+
+```
+  
+    
+  Set the relevant variable names.
+```{r}
+
+y <- "bikes_avail_now"
+
+x <- train_h2o %>% 
+  map(~setdiff(names(.x),
+               y
+               )
+      )
+
+```
+  
+    
+  Run `h2o.automl`.
+```{r}
+
+# h2o.shutdown(prompt = TRUE)
+# plan(multiprocess)
+# cl <- h2o.makeEC2ClusterPsock(public_ip = public_ip,
+#                               max_mem_size = "5g",
+#                               ssh_private_key_file = ssh_private_key_file,
+#                               dryrun = F,
+#                               h2o = T
+#                               )
+# plan(cluster, workers = cl)
+
+
+# user   system  elapsed 
+#   82.212   26.563 7291.869 
+# ~ 2 hours
+start <- proc.time()
+
+automl_models_h2o <-
+  pmap(
+  # future_pmap(
+    .l = list(
+      a = x,
+      b = train_h2o,
+      c = valid_h2o,
+      d = test_h2o
+      ),
+    .f = function(a, b, c, d) {
+      h2o.automl(x = a,
+                    y = y,
+                    training_frame = b,
+                    validation_frame = c,
+                    leaderboard_frame = d,
+                    nfolds = 10,
+                    max_runtime_secs = 3600, # 1 hour
+                    # max_runtime_secs = 60, # 1 hour
+                    max_models = 10,
+                    stopping_metric = "deviance",
+                    seed = 123456789
+                    )
+         }
+       )
+
+h2o.time <- proc.time() - start
+h2o.time
+
+
+rm(start)
+
+```
+  
+    
+  Save the resulting .rds files.
+```{r}
+
+saveRDS(h2o.time,
+        paste0(wd,
+               "/Models/",
+               "h2o.time.rds"
+               )
+        )
+
+# h2o.time <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "h2o.time.rds"
+#                          )
+#            )
+
+saveRDS(automl_models_h2o,
+        paste0(wd,
+               "/Models/",
+               "automl_models_h2o.rds"
+               )
+        )
+
+# automl_models_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "automl_models_h2o.rds"
+#                          )
+#            )
+
+```
+  
+    
+  Extract leader models, and save each model.
+```{r}
+
+# extract the leader models
+automl_leader <-
+  pmap(.l = list(a = automl_models_h2o),
+       .f = function(a) {
+         a@leader
+         }
+       )
+
+# str(automl_models_h2o)
+
+
+# save each individual model
+model_path_h2o <-
+  automl_leader %>% 
+  map(~h2o.saveModel(object = .x,
+                     path = paste0(wd,
+                                   "/Models/"
+                                   ),
+                     force = TRUE
+                     )
+      )
+
+saveRDS(model_path_h2o,
+        paste0(wd,
+               "/Models/",
+               "model_path_h2o.rds"
+               )
+        )
+
+# model_path_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "model_path_h2o.rds"
+#                          )
+#            )
+# 
+# print(model_path_h2o)
+
+# load the model
+# automl_leader <-
+#   model_path_h2o %>%
+#   map(~h2o.loadModel(.x)
+#       )
+
+```
+  
+    
+  Investigate variable importance of the leader models.
+```{r}
+
+leader_models_varimp <-
+  pmap(.l = list(a = automl_models_h2o),
+       .f = function(a) {
+         h2o.varimp(object = a@leader)
+         }
+       )
+
+leader_models_varimp_plot <-
+  pmap(.l = list(a = automl_models_h2o),
+       .f = function(a) {
+         h2o.varimp_plot(model = a@leader, num_of_features = 10)
+         }
+       )
+
+leader_models_varimp %>% 
+  map(~as.data.frame(.x))
+
+leader_models_varimp_plot
+
+```
+  
+    
+  Create predictions from the models.
+```{r}
+
+pred_h2o <-
+  pmap(.l = list(a = automl_leader,
+                 b = test_h2o
+                 ),
+       .f = function(a, b) {
+         h2o.predict(a, newdata = b)
+         }
+       )
+
+# save as a .rds file
+saveRDS(pred_h2o,
+        paste0(wd,
+               "/Models/",
+               "pred_h2o.rds"
+               )
+        )
+
+# pred_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "pred_h2o.rds"
+#                          )
+#            )
+
+```
+  
+    
+  Look at performance stats using the test data.
+```{r}
+
+pmap(.l = list(a = automl_leader,
+               b = test_h2o
+               ),
+     .f = function(a, b) {
+       h2o.performance(a, newdata = b)
+       }
+     )
+
+```
+  
+    
+  Investigate test error.
+```{r}
+
+error_tbl_h2o <-
+  pmap(.l = list(a = tbl_test,
+                 b = pred_h2o
+                 ),
+       .f = function(a, b) {
+         a %>% 
+           add_column(pred = b %>% as_tibble() %>% pull(predict)) %>% 
+           rename(actual = bikes_avail_now) %>% 
+           mutate(error = actual - pred,
+                  error_pct = error / actual
+                  ) 
+         }
+       )
+
+
+# save as a .rds file
+saveRDS(error_tbl_h2o,
+        paste0(wd,
+               "/Models/",
+               "error_tbl_h2o.rds"
+               )
+        )
+
+# error_tbl_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "error_tbl_h2o.rds"
+#                          )
+#            )
+
+```
+
+
+```{r}
+
+pmap(.l = list(a = error_tbl_h2o,
+               b = names(error_tbl_h2o)
+               ),
+     .f = function(a, b) {
+       a %>% 
+         summarise(me   = mean(error, na.rm = TRUE),
+                   rmse = mean(error^2, na.rm = TRUE)^0.5,
+                   mae  = mean(abs(error), na.rm = TRUE),
+                   mape = mean(abs(error_pct), na.rm = TRUE),
+                   mpe  = mean(error_pct, na.rm = TRUE)
+                   ) %>% 
+          # glimpse() %>% 
+         mutate(station_id = b)
+       }
+     ) %>% 
+  bind_rows()
+
+```
+  
+    
+  Create predictions from the models on the validation data.
+```{r}
+
+valid_data_pred_h2o <-
+  pmap(.l = list(a = automl_leader,
+                 b = valid_data_h2o
+                 ),
+       .f = function(a, b) {
+         h2o.predict(a, newdata = b)
+         }
+       )
+
+# save as a .rds file
+saveRDS(valid_data_pred_h2o,
+        paste0(wd,
+               "/Models/",
+               "valid_data_pred_h2o.rds"
+               )
+        )
+
+# valid_data_pred_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "valid_data_pred_h2o.rds"
+#                          )
+#            )
+
+```
+  
+    
+  Look at performance stats using the test data.
+```{r}
+
+pmap(.l = list(a = automl_leader,
+               b = valid_data_h2o
+               ),
+     .f = function(a, b) {
+       h2o.performance(a, newdata = b)
+       }
+     )
+
+```
+  
+    
+  Investigate test error.
+```{r}
+
+valid_data_error_tbl_h2o <-
+  pmap(.l = list(a = valid_data,
+                 b = valid_data_pred_h2o
+                 ),
+       .f = function(a, b) {
+         a %>% 
+           add_column(pred = b %>% as_tibble() %>% pull(predict)) %>% 
+           rename(actual = bikes_avail_now) %>% 
+           mutate(error = actual - pred,
+                  error_pct = error / actual
+                  ) 
+         }
+       )
+
+
+# save as a .rds file
+saveRDS(valid_data_error_tbl_h2o,
+        paste0(wd,
+               "/Models/",
+               "valid_data_error_tbl_h2o.rds"
+               )
+        )
+
+# valid_data_error_tbl_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "valid_data_error_tbl_h2o.rds"
+#                          )
+#            )
+
+```
+
+
+```{r}
+
+pmap(.l = list(a = valid_data_error_tbl_h2o,
+               b = names(valid_data_error_tbl_h2o)
+               ),
+     .f = function(a, b) {
+       a %>% 
+         summarise(me   = mean(error, na.rm = TRUE),
+                   rmse = mean(error^2, na.rm = TRUE)^0.5,
+                   mae  = mean(abs(error), na.rm = TRUE),
+                   mape = mean(abs(error_pct), na.rm = TRUE),
+                   mpe  = mean(error_pct, na.rm = TRUE)
+                   ) %>% 
+          # glimpse() %>% 
+         mutate(station_id = b)
+       }
+     ) %>% 
+  bind_rows()
+
+```
+    
+    
+  Remove no-longer-needed files.
+```{r}
+
+rm(automl_leader, automl_models_h2o, lmtd_vars_lag3, leader_models_varimp, leader_models_varimp_plot, model_path_h2o, pred_h2o, test_h2o, train_h2o, valid_h2o, x, h2o.time, y
+   )
+
+```
+  
+    
+  Shutting down h2o.
+```{r}
+
+h2o.shutdown()
+
+```
+  
+  

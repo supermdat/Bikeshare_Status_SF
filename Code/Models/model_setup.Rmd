@@ -88,7 +88,7 @@ id_split <-
          df = a %>% 
            tail(n = -3) %>% # remove first three rows because of lags
            mutate_if(is.factor, factor) %>% 
-           select(-docks_available) %>% # remove `docks_avail_now` because you won't know this at the time of prediction
+           select(-docks_avail_now) %>% # remove `docks_avail_now` because you won't know this at the time of prediction
            as.data.table() %>% 
            setkey(time_rnd, station_id)
          
