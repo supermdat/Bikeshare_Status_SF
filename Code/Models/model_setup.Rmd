@@ -117,7 +117,7 @@ func_train_valid_test <-
     dt =
       data %>% 
       arrange(time_rnd) %>% 
-      mutate(row_num = row_number(),
+      mutate(row_num = row_number(time_rnd),
              data_type = case_when(row_num < split_pt_train ~ "01_train",
                                    between(x = row_num,
                                            lower = split_pt_train,
