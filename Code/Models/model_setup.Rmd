@@ -339,7 +339,7 @@ rm(vars_to_lag_dt, vars_to_not_lag_dt, lags_3)
   Remove no-longer-needed files.
 ```{r}
 
-rm(id_split, id_split_one_hot, small_test, status_trips_time, func_train_valid_test)
+rm(id_split, id_split_one_hot, status_trips_time, func_train_valid_test)
 
 ```
   
