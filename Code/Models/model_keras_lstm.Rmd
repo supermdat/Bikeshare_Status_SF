@@ -1,0 +1,790 @@
+---
+title: "Step 04: Models - Keras LSTM"
+output: html_notebook
+---
+
+
+
+[https://blogs.rstudio.com/tensorflow/posts/2017-12-20-time-series-forecasting-with-recurrent-neural-networks/](https://blogs.rstudio.com/tensorflow/posts/2017-12-20-time-series-forecasting-with-recurrent-neural-networks/)
+
+  
+**NOTE:** before running this chunk, the AWS Instance Type was switched from t2.micro to t3.2xlarge.
+
+
+## Setup    
+  Load the relevant libraries.
+```{r}
+# {r, message=FALSE, warning=FALSE}
+
+# rm(list = ls())
+# .rs.restartR()
+
+
+library("tidyverse")
+# install.packages("data.table")
+library("data.table")
+library("lubridate")
+# install.packages("timetk")
+# library("timetk")
+# library("DBI")
+# install.packages("RSQLite")
+# library("RSQLite")
+# install.packages("rJava")
+# library("rJava")
+# install.packages("h2o")
+# library("h2o")
+# install.packages("furrr")
+# Preprocessing
+library(recipes)
+
+# Sampling / Accuracy
+library("rsample")
+library("yardstick") 
+library("furrr")
+library("caret")
+library("keras")
+
+```
+  
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+
+
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+  
+    
+  Limit the base dataset.
+```{r}
+
+lmtd_vars_lag3 <- lmtd_vars_lag3 %>% 
+  map(~select(.x,
+              station_id:minute.55
+              )
+      )
+
+names(lmtd_vars_lag3)
+lmtd_vars_lag3$`10` %>% class()
+lmtd_vars_lag3$`10` %>% glimpse()
+
+```
+  
+    
+  Create lags of 3.
+```{r}
+
+vars_to_lag_dt <-
+  lmtd_vars_lag3 %>% 
+  # map(~select(.x, minute.0:minute.55) %>%
+  # map(~select(.x, wday.lbl.Friday:minute.55) %>%
+  # map(~select(.x, year.2013:week.9) %>%
+  map(~select(.x, wday.lbl.Friday:minute.55) %>% 
+        as.data.table()
+      )
+
+vars_to_not_lag_dt <-
+  lmtd_vars_lag3 %>% 
+  map(~select(.x,
+              station_id:bikes_avail_lag15,
+              # station_id:Subscriber_cnt_15min_window_start,
+              ) %>% 
+        as.data.table()
+      )
+
+# id_split %>% map(~colnames(.x))
+# vars_to_lag_dt %>% map(~colnames(.x))
+
+lags_3 <-
+  pmap(.l = list(a = vars_to_lag_dt),
+       .f = function(a) {
+         dat = a[ , sapply(names(a),
+                           function(x) {
+                             paste0(x, '_lag', c("05min", "10min", "15min"))
+                             # paste0(x, '_lag', "05min")
+                             }
+                           ) := shift(.SD, 1:3),
+                  .SDcols = wday.lbl.Friday:minute.55
+                  ][]
+         
+         dat = dat[4:nrow(a), ]
+         
+         return(dat)
+         }
+       )
+# lags_3$`10` %>% select(matches("minute\\.0")) %>% head(100) %>% View()
+
+all_vars_lag3 <-
+  pmap(.l = list(a = vars_to_not_lag_dt,
+                 b = lags_3
+                 ),
+       .f = function(a, b) {
+         bind_cols(a[4:nrow(a), ],
+                   b
+                   ) %>% 
+           select(#-data_type,
+                  # -(wday.lbl.Friday:minute.55)
+                  -(wday.lbl.Friday:minute.55)
+                  # -bikes_avail_lag10,
+                  # -bikes_avail_lag15
+                  )
+         }
+       )
+
+# all_vars_lag3 %>% map(~colnames(.x))
+all_vars_lag3$`10` %>% glimpse()
+# View(all_vars_lag3$`10` %>% 
+#        select(time_rnd,
+#               matches("month\\.lbl\\.August")
+#               ) %>% 
+#        head(100)
+#      )
+# View(all_vars_lag3$`10` %>% 
+#        select(time_rnd,
+#               matches("minute\\.0")
+#               ) %>% 
+#        head(100)
+#      )
+((all_vars_lag3$`10` %>% ncol()) - 5) / 3
+
+
+rm(vars_to_lag_dt, vars_to_not_lag_dt, lags_3)
+
+```
+
+
+```{r}
+
+train_data <-
+  all_vars_lag3 %>% 
+  map(~filter(.x, data_type == "01_train")
+      )
+      
+# valid_data <-
+#   all_vars_lag3 %>% 
+#   map(~filter(.x, data_type == "02_valid")
+#       )
+
+```
+
+
+
+```{r}
+
+period_train <-  #6 * 24 * 365 * 1.5 # 1.5 years of training
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "period_train.Rds"
+                 )
+          )
+
+period_test <-  #6 * 24 * 365 * 0.5 # 0.5 year of training
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "period_test.Rds"
+                 )
+          )
+
+skip_span <-  #6 * 24 * 75 # produces 10 splits
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "skip_span.Rds"
+                 )
+          )
+
+
+rolling_origin_resamples <- 
+  # all_vars_lag3 %>%
+  train_data %>% 
+  map(~rolling_origin(.x,
+                      initial    = period_train,
+                      assess     = period_test,
+                      cumulative = FALSE,
+                      skip       = skip_span
+                      )
+      )
+
+rolling_origin_resamples %>% map(~nrow(.x))
+
+```
+
+
+# Run a Keras LSTM for each split for each station_id  
+  
+  First, create a function that wil do all the computations for each split.
+```{r}
+
+func_predict_all_splits <-
+  function(split) {
+    
+    # Create train, validation, & test sets
+        tot_rows =
+          split %>% 
+          map(~analysis(.x) %>% 
+                nrow()
+              )
+    
+        splt_rows =
+          pmap(.l = list(a = tot_rows),
+               .f = function(a) {
+                 round(a * 0.70)
+                 }
+               )
+    
+        df_trn = 
+          pmap(.l = list(a = split,
+                         b = splt_rows
+                         ),
+               .f = function(a, b) {
+                 dat = analysis(a)[1:b, , drop = FALSE]
+                 }
+               )
+        
+        df_val =
+          pmap(.l = list(a = split,
+                         b = splt_rows,
+                         c = tot_rows
+                         ),
+               .f = function(a, b, c) {
+                 dat = analysis(a)[(b + 1):c, , drop = FALSE]
+                 }
+               )
+        
+        df_tst =
+          split %>% 
+          map(~assessment(.x)
+              )
+        
+        df =
+          pmap(.l = list(a = df_trn,
+                         b = df_val,
+                         c = df_tst
+                         ),
+               .f = function(a, b, c) {
+                 bind_rows(a %>% add_column(key = "training"),
+                           b %>% add_column(key = "validation"),
+                           c %>% add_column(key = "testing")
+                           ) %>% 
+                   select(-data_type)
+                 }
+               )
+        
+    # Center & scale the variables
+        df_trn_num_vars =
+          df_trn %>% 
+          map(~select(.x,
+                      -station_id,
+                      -data_type,
+                      -row_num,
+                      -time_rnd
+                      )
+              )
+        
+        mean = df_trn_num_vars %>% map(~apply(.x, 2, mean, na.rm = TRUE))
+        
+        std = df_trn_num_vars %>% map(~apply(.x, 2, sd, na.rm = TRUE))
+        
+        data =
+          pmap(.l = list(a = df,
+                         b = mean,
+                         c = std
+                         ),
+               .f = function(a, b, c) {
+                 scale_info =
+                   scale(a %>% 
+                           select(-key,
+                                  -station_id,
+                                  -row_num,
+                                  -time_rnd
+                                  ),
+                         center = b,
+                         scale = c
+                         )
+                 
+                 df = scale_info %>% 
+                   as.data.frame() %>% 
+                   bind_cols(a %>% select(key, station_id, row_num, time_rnd)
+                             )
+                 
+                 return(list(scale_info = scale_info,
+                             df = df
+                             )
+                        )
+                 }
+               )
+        
+    # Setup for Keras LSTM modeling
+        n_timesteps = 3
+        n_predictions = n_timesteps
+        # batch_size — The number of samples per batch.
+        batch_size = (6 * 24 * 1) # 1 days of data #128
+        # lookback — How many timesteps back the input data should go
+        lookback = (6 * 24 * 14) #Observations will go back 14 days
+        # step — The period, in timesteps, at which you sample data. You’ll set it 6 in order 
+          # to draw one data point every hour.
+        # step <- 1 #6 #Observations will be sampled at one data point per hour
+        # delay — How many timesteps in the future the target should be
+        delay = 1
+        
+    # Reshape the data
+        # The input has to be a 3-d array of size num_samples, num_timesteps, num_features.
+        # Here, num_samples is the number of observations in the set. This will get fed to the
+          # model in portions of batch_size. The second dimension, num_timesteps, is the 
+          # length of the hidden state we were talking about above. Finally, the third 
+          # dimension is the number of predictors we’re using. For univariate time series, 
+          # this is 1.
+        
+        reshape_X_3d = function(X) {
+          dim(X) <- c(dim(X)[1], # samples
+                      1, # timesteps
+                      dim(X)[2] # features
+                      )
+          X
+        }
+
+        reshape_y_3d = function(X) {
+          dim(X) <- c(length(X), # samples
+                      1, # timesteps
+                      1 # features
+                      )
+          X
+        }
+        
+    # extract values from data frame
+        train_vals =
+          pmap(.l = list(a = data),
+               .f = function(a) {
+                 a$df %>%
+                   filter(key == "training") %>%
+                   select(-key, -station_id, -time_rnd, -row_num)
+                 }
+               )
+
+        valid_vals =
+          pmap(.l = list(a = data),
+               .f = function(a) {
+                 a$df %>%
+                   filter(key == "validation") %>%
+                   select(-key, -station_id, -time_rnd, -row_num)
+                 }
+               )
+
+        test_vals =
+          pmap(.l = list(a = data),
+               .f = function(a) {
+                 a$df %>%
+                   filter(key == "testing") %>%
+                   select(-key, -station_id, -time_rnd, -row_num)
+                 }
+               )
+        
+    # Build the matrices needed for Keras
+        train_matrix_X =
+          train_vals %>%
+          map(~select(.x, -bikes_avail_now) %>%
+                as.matrix()
+              )
+
+        train_matrix_y =
+          train_vals %>%
+          map(~select(.x, bikes_avail_now) %>%
+                as.matrix()
+              )
+
+        valid_matrix_X =
+          valid_vals %>%
+          map(~select(.x, -bikes_avail_now) %>%
+                as.matrix()
+              )
+
+        valid_matrix_y =
+          valid_vals %>%
+          map(~select(.x, bikes_avail_now) %>%
+                as.matrix()
+              )
+
+        test_matrix_X =
+          test_vals %>%
+          map(~select(.x, -bikes_avail_now) %>%
+                as.matrix()
+              )
+
+        test_matrix_y =
+          test_vals %>%
+          map(~select(.x, bikes_avail_now) %>%
+                as.matrix()
+              )
+        
+    # separate matrices into training and testing parts
+        # also, discard last batch if there are fewer than batch_size samples (a purely 
+        # technical requirement)
+        X_train = train_matrix_X
+        y_train = train_matrix_y
+        X_train = map(X_train, function(x) x[1:(nrow(x) %/% batch_size * batch_size), ])
+        y_train = map(y_train, function(x) x[1:(nrow(x) %/% batch_size * batch_size), ])
+
+        X_valid = valid_matrix_X
+        y_valid = valid_matrix_y
+        X_valid = map(X_valid, function(x) x[1:(nrow(x) %/% batch_size * batch_size), ])
+        y_valid = map(y_valid, function(x) x[1:(nrow(x) %/% batch_size * batch_size), ])
+
+        X_test = test_matrix_X
+        y_test = test_matrix_y
+        # X_test = map(X_test, function(x) x[1:(nrow(x) %/% batch_size * batch_size), ])
+        # y_test = map(y_test, function(x) x[1:(nrow(x) %/% batch_size * batch_size), ])
+        
+    # add on the required third axis
+        X_train = X_train %>% map(~reshape_X_3d(.x))
+        X_valid = X_valid %>% map(~reshape_X_3d(.x))
+        X_test = X_test %>% map(~reshape_X_3d(.x))
+
+        y_train = y_train %>% map(~reshape_y_3d(.x))
+        y_valid = y_valid %>% map(~reshape_y_3d(.x))
+        y_test = y_test %>% map(~reshape_y_3d(.x))
+        
+    # # create the model
+        model =
+          pmap(.l = list(a = X_train),
+               .f = function(a) {
+                 mod = keras_model_sequential()
+                 
+                 # add layers:  we have just two, the LSTM and the time_distributed
+                 mod %>%
+                  layer_lstm(
+                    # size of the LSTM layer
+                    units = 128,
+                    input_shape = c(1,
+                                    # 132
+                                    dim(a)[3]
+                                    ),
+                    dropout = 0.2,
+                    recurrent_dropout = 0.2,
+                    # by default, an LSTM just returns the final state
+                    return_sequences = TRUE
+                    ) %>%
+                  time_distributed(layer_dense(units = 1))
+        
+                mod %>%
+                  compile(
+                    loss = "mae",
+                    optimizer = optimizer_rmsprop(),
+                    # in addition to the loss, Keras will inform about current MSE
+                    metrics = list("mean_squared_error")
+                    )
+        
+                mod
+                 }
+               )
+
+        history =
+          pmap(.l = list(a = model,
+                         b = X_train,
+                         c = y_train,
+                         d = X_valid,
+                         e = y_valid
+                         ),
+               .f = function(a, b, c, d, e) {
+                 a %>% 
+                   fit(x = b,
+                       y = c,
+                       validation_data = list(d, e),
+                       batch_size = batch_size,
+                       epochs = 100,
+                       shuffle = FALSE,
+                       # callbacks = callback_early_stopping(patience = 10),
+                       verbose = 0
+                       )
+                 }
+               )
+        
+    # Create predictions on test data
+        test_predict =
+          pmap(.l = list(a = model,
+                         b = X_test,
+                         c = data
+                         ),
+               .f = function(a, b, c) {
+                 data.frame(keras_lstm_raw = a %>% 
+                              predict(b, batch_size = nrow(b)
+                               ),
+                            scale_value = attr(c$scale_info, "scaled:scale")[[1]],
+                            center_value = attr(c$scale_info, "scaled:center")[[1]]
+                            ) %>% 
+                   mutate(keras_lstm_uns = (keras_lstm_raw * scale_value) + center_value,
+                          keras_lstm_uns_rnd = round(keras_lstm_uns, 0),
+                          keras_lstm_uns_flr = floor(keras_lstm_uns)
+                          )
+                 }
+               )
+        
+        to_compare = 
+          df_tst %>% 
+          map(~select(.x,
+                      time_rnd,
+                      bikes_avail_now
+                      )
+              )
+        
+        actual_vs_pred =
+          pmap(.l = list(a = test_predict,
+                         b = to_compare
+                         ),
+               .f = function(a, b) {
+                 a %>% 
+                   bind_cols(b) %>% 
+                   mutate(error = bikes_avail_now - keras_lstm_uns_rnd,
+                          error_pct = (error / bikes_avail_now),
+                          )
+                 }
+               )
+        
+        error_stats =
+          actual_vs_pred %>% 
+          map(~summarise(.x,
+                         me = mean(error, na.rm = TRUE),
+                         mse = mean(error^2, na.rm = TRUE),
+                         rmse = sqrt(mse),
+                         mae = mean(abs(error), na.rm = TRUE),
+                         mape = mean(abs(error_pct), na.rm = TRUE),
+                         mpe = mean(error_pct, na.rm = TRUE)
+                         )
+              )
+        
+    return(list(model = model,
+                history = history,
+                actual_vs_pred = actual_vs_pred,
+                error_stats = error_stats
+                )
+           )
+        
+            }
+
+```
+  
+    
+  Next, I simply run the function.
+```{r}
+
+# user    system   elapsed 
+# 29900.080  4018.148  8608.073 
+# ~ 2 hours 24 minutes
+start <- proc.time()
+
+keras_predict_all_stations_all_splits <-
+  pmap(.l = list(a = rolling_origin_resamples),
+       .f = function(a) {
+         a$splits %>%
+           func_predict_all_splits()
+         }
+       )
+
+time.keras_lstm <- proc.time() - start
+
+message("time.keras_lstm")
+time.keras_lstm
+
+
+saveRDS(keras_predict_all_stations_all_splits,
+        paste0(wd,
+               "/Models/",
+               "keras_predict_all_stations_all_splits.rds"
+               )
+        )
+
+# keras_predict_all_stations_all_splits <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "keras_predict_all_stations_all_splits.rds"
+#                          )
+#            )
+
+
+
+saveRDS(time.keras_lstm,
+        paste0(wd,
+               "/Models/",
+               "time.keras_lstm.rds"
+               )
+        )
+
+# time.keras_lstm <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "time.keras_lstm.rds"
+#                          )
+#            )
+
+```
+
+    
+  Plot the loss curves.
+```{r}
+
+# keras_predict_all_stations_all_splits$`10`$history[9] %>% plot()
+
+
+pmap(.l = list(a = keras_predict_all_stations_all_splits),
+     .f = function(a) {
+       a$history[1:2] %>% 
+         map(~plot(.x))
+       }
+     )
+
+```
+  
+    
+  Save the results.
+```{r}
+
+# saveRDS(basic_reg_model,
+#         paste0(wd,
+#                "/Models/",
+#                "basic_reg_model.rds"
+#                )
+#         )
+
+# basic_reg_model <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "basic_reg_model.rds"
+#                          )
+#            )
+
+
+pmap(.l = list(a = keras_predict_all_stations_all_splits[1],
+               b = names(keras_predict_all_stations_all_splits[1])
+               ),
+     .f = function(a, b) {
+       save_model_hdf5(object = a,
+                       filepath = paste0(wd,
+                                         "/Models/",
+                                         "keras_lstm_model_",
+                                         b,
+                                         ".h5"
+                                         )
+                       )
+       }
+     )
+
+
+# saveRDS(history_basic_reg_model,
+#         paste0(wd,
+#                "/Models/",
+#                "history_basic_reg_model.rds"
+#                )
+#         )
+
+# history_basic_reg_model <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "history_basic_reg_model.rds"
+#                          )
+#            )
+
+```
+  
+ 
+  
+    
+  Create predictions from the models.
+```{r}
+
+# keras_predict_all_stations_all_splits$`10`$actual_vs_pred %>% 
+#   map(~summary(.x))
+
+
+keras_lstm_mean_mae <-
+  pmap(.l = list(a = keras_predict_all_stations_all_splits,
+                 b = names(keras_predict_all_stations_all_splits)
+                 ),
+       .f = function(a, b) {
+         base = a$error_stats
+         
+         final =
+           pmap(.l = list(c = base),
+                .f = function(c) {
+                  c$mae
+                  }
+                )
+         
+         single_val =
+           final %>% 
+           unlist() %>% 
+           mean(na.rm = TRUE) %>% 
+           as.data.frame() %>% 
+           mutate(station_id = b) %>% 
+           rename(mae_mean = ".")
+         
+         return(single_val)
+         }
+       ) %>% 
+  bind_rows()
+
+keras_lstm_mean_mae
+
+saveRDS(keras_lstm_mean_mae,
+        paste0(wd,
+               "/Models/",
+               "keras_lstm_mean_mae.rds"
+               )
+        )
+
+# keras_lstm_mean_mae <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "keras_lstm_mean_mae.rds"
+#                          )
+#            )
+
+  
+
+keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[10]]$time_rnd %>% min()
+keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[10]]$time_rnd %>% max()
+
+keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[10]] %>% 
+  gather(
+              key = "key",
+              value = "value",
+              keras_lstm_uns_rnd,
+              bikes_avail_now
+              ) %>% 
+        ggplot(aes(x = time_rnd, y = value, color = key)) +
+        geom_line() +
+        coord_cartesian(
+          xlim = c(as_datetime("2014-11-11 00:00:00",
+                                             tz = "America/Los_Angeles"
+                                             ),
+                                 as_datetime("2014-11-12 00:00:00",
+                                             tz = "America/Los_Angeles"
+                                             )
+                                 ),
+                        ylim = c(0, 12)
+                        ) +
+        scale_y_continuous(breaks = seq(0, 8, 2)) +
+        theme_minimal() +
+        theme(legend.position = "bottom")
+
+
+```
+
+
