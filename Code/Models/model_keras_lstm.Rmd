@@ -191,21 +191,21 @@ train_data <-
 
 ```{r}
 
-period_train <-  #6 * 24 * 365 * 1.5 # 1.5 years of training
+period_train <-  # (12 * 24 * 365 * 0.5) # 0.5 years of training data
   readRDS(paste0(wd,
                  "/Data/Interim/",
                  "period_train.Rds"
                  )
           )
 
-period_test <-  #6 * 24 * 365 * 0.5 # 0.5 year of training
+period_test <-  # (12 * 24 * 365 * 0.25) # 0.25 years of testing data
   readRDS(paste0(wd,
                  "/Data/Interim/",
                  "period_test.Rds"
                  )
           )
 
-skip_span <-  #6 * 24 * 75 # produces 10 splits
+skip_span <-  # (12 * 24 * 25) # gives 10 evenly distributed  splits
   readRDS(paste0(wd,
                  "/Data/Interim/",
                  "skip_span.Rds"
@@ -337,9 +337,9 @@ func_predict_all_splits <-
         n_timesteps = 3
         n_predictions = n_timesteps
         # batch_size — The number of samples per batch.
-        batch_size = (6 * 24 * 1) # 1 days of data #128
+        batch_size = (12 * 24 * 1) # 1 days of data #128
         # lookback — How many timesteps back the input data should go
-        lookback = (6 * 24 * 14) #Observations will go back 14 days
+        lookback = (12 * 24 * 14) #Observations will go back 14 days
         # step — The period, in timesteps, at which you sample data. You’ll set it 6 in order 
           # to draw one data point every hour.
         # step <- 1 #6 #Observations will be sampled at one data point per hour
