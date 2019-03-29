@@ -331,9 +331,9 @@ rm(
   DV_corr_predict
   )
 
-period_train <- (6 * 24 * 365 * 1) # 1.0 years of training data
-period_test <- (6 * 24 * 365 * 0.5) # 0.5 years of testing data
-skip_span <- (6 * 24 * 50) # gives 10 evenly distributed  splits
+period_train <- (12 * 24 * 365 * 0.5) # 0.5 years of training data
+period_test <- (12 * 24 * 365 * 0.25) # 0.25 years of testing data
+skip_span <- (12 * 24 * 25) # gives 10 evenly distributed  splits
 # DV_nzv_predict$`10` %>% nrow()
 
 rolling_origin_resamples <-
