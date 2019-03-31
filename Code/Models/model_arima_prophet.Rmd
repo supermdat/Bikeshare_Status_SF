@@ -1,0 +1,885 @@
+---
+title: "Step 04: Models - ARIMA and Prophet"
+output:
+  html_document:
+    df_print: paged
+---
+  
+## Setup    
+  Load the relevant libraries.
+```{r, message=FALSE, warning=FALSE}
+
+# rm(list = ls())
+# .rs.restartR()
+
+# data manipulation
+library("plyr")
+library("tidyverse")
+library("magrittr")
+library("lubridate")
+
+# time series specific packages
+library("timetk")
+library("zoo")
+library("tibbletime")
+
+# modeling
+library("fpp2")
+library("prophet")
+
+# other
+library("rsample")            # rolling samples for validation stats
+library("ggplot2")            # viz
+library("sweep")              # more easily pull out model statistics
+library("yardstick")          # easily calculate accuracy stats
+library("doParallel")         # parallel processing
+
+```
+  
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+  
+    
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+
+
+## Modeling
+
+**NOTE: `period_train`, `period_test`, and `skip_span`, are the outputs produced in Step 02 and Step 03**
+```{r}
+
+period_train <- # (12 * 24 * 365 * 0.5) # 0.5 years of training data
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "period_train.Rds"
+                 )
+          )
+
+period_test <- # (12 * 24 * 365 * 0.25) # 0.25 years of testing data
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "period_test.Rds"
+                 )
+          )
+
+skip_span <- # (12 * 24 * 25) # gives 10 evenly distributed  splits
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "skip_span.Rds"
+                 )
+          )
+
+```  
+  
+    
+  Creating the datasets used in modeling.
+```{r}
+
+lmtd_vars_lag3 <-
+  lmtd_vars_lag3 %>% 
+  map(~select(.x, station_id:minute.55 ))
+
+# small_test <- small_test[1:2]
+
+message("small_test")
+names(small_test)
+small_test$`10` %>% class()
+small_test$`10` %>% glimpse()
+
+message("lmtd_vars_lag3")
+lmtd_vars_lag3$`10` %>% class()
+lmtd_vars_lag3$`10` %>% glimpse()
+
+
+# this odd combination of one-hot encoded variables and "normal" variables is only necessary so that a single dataset can be used for Prophet models with "additional regressors"
+combo <-
+  pmap(.l = list(a = small_test,
+                 b = lmtd_vars_lag3
+                 ),
+       .f = function(a, b) {
+         a %>% 
+           inner_join(y = b %>% select(time_rnd, wday.lbl.Friday:minute.55),
+                      by = c("time_rnd" = "time_rnd")
+                      )
+         }
+       )
+
+message("combo")
+combo$`10` %>% glimpse()
+
+
+rm(small_test, lmtd_vars_lag3)
+
+
+
+train_data <-
+  combo %>% 
+  map(~filter(.x, data_type == "01_train"))
+
+message("train_data")
+train_data %>% 
+  map(~dim(.x))
+
+```
+
+
+### Setup for Models Not in `caret` 
+  
+  This is based on the example shown [here](https://topepo.github.io/rsample/articles/Applications/Time_Series.html), and is needed for the time-series-ish models, which are not currently part of the `caret` modeling process.
+    
+  Create the rolling-origin resamples to be used for measuring forecast accuracy. Rolling samples will use 0.5 years of data do predict the next 0.25 years of data.  
+```{r}
+
+roll_rs <-
+  train_data %>% 
+  map(~ rolling_origin(.x,
+                       initial = period_train,
+                       assess = period_test,
+                       cumulative = FALSE,
+                       skip = skip_span
+                       )
+      )
+
+message("train_data")
+# DV_train_data %>% 
+train_data %>% 
+  map(~ nrow(.x)
+      )
+  
+message("roll_rs")
+roll_rs %>% 
+  map(~ dim(.x)
+      )
+
+names(roll_rs$`10`)
+
+roll_rs %>% 
+  map(~ length(.x$splits)
+      )
+
+```
+  
+    
+  For plotting, let’s index each split by the first day of the assessment set.
+```{r}
+
+get_date <-
+  function(x)
+    min(assessment(x)$time_rnd
+        )
+
+roll_rs <-
+  pmap(.l = list(a = roll_rs),
+       .f = function(a) {
+         data = a
+         
+         splits = data$splits %>% 
+           map(get_date)
+         
+         data$start_date = do.call("c", splits)
+         
+         return(data)
+         }
+       )
+
+names(roll_rs$`10`)
+length(roll_rs$`10`$start_date)
+head(roll_rs$`10`$start_date, 20)
+
+
+rm(get_date)
+
+```
+
+
+### Model Setup (`forecast::auto.arima` and `prophet::prophet`)
+      
+  Here, we use `forecast::auto.arima` to produce create an arima model. We also try `prophet::prophet` to create a model based on trend, seasonality, and holidays, and that is a bit like a general additive model. More info can be found [here](https://facebook.github.io/prophet/) and [here](https://peerj.com/preprints/3190/).  
+    
+  First, I create the function for the basic ARIMA model.
+```{r}
+
+fit_model_arima <-
+  function(x, ...) {
+    data = x %>% 
+      analysis() %>% 
+      # Since the first day changes over resamples, adjust it based on the first date value in the data frame
+      tk_ts(select = bikes_avail_now,
+            start = .$time_rnd[[1]] %>% lubridate::year(),
+            freq = (12 * 24), # 12 readings per hour for 24 hours
+            silent = TRUE
+            )
+    
+    fit = auto.arima(data, ...)
+    
+    return(fit)
+  }
+
+```
+  
+    
+  Next I create the function to run an ARIMA model with external regressors (external regressors include fourier transformations, and other regressors identified by using the random forest and xgboost models used above).
+```{r}
+
+fit_model_arima_xreg <-
+  function(x, ...) {
+    data = 
+      x %>% 
+      analysis()
+    
+    # hourly frequency
+    ts_hr =
+      data %>% 
+      tk_ts(select = bikes_avail_now,
+            start = .$time_rnd[[1]] %>% lubridate::year(),
+            freq = 12, # 12 readings per hour
+            silent = TRUE
+            )
+    
+    # daily frequency
+    ts_7 =
+      data %>% 
+      tk_ts(select = bikes_avail_now,
+            start = .$time_rnd[[1]] %>% lubridate::year(),
+            freq = (12 * 24), # 12 readings per hour for 24 hours
+            silent = TRUE
+            )
+    
+    # use a fourier transformation to capture daily seasonality and choose K programatically
+    bestfit = list(aicc = Inf)
+    for(K in seq(7)
+        ) {
+      n = nrow(assessment(x)
+               )
+      
+      ts_7_fourier = fourier(ts_7,
+                               K = K
+                               )
+      
+      ts_7_fourier_future = fourier(ts_7,
+                                      K = K,
+                                      h = n
+                                      )
+      
+      fit = auto.arima(ts_hr,
+                       xreg = cbind(ts_7_fourier,
+                                    # additional variables identified as "important" with Random Forest and XGBTree models
+                                    data$wday.lbl,
+                                    data$hour,
+                                    data$minute,
+                                    data$bikes_avail_lag05,
+                                    data$bikes_avail_lag10,
+                                    data$bikes_avail_lag15
+                                    )
+                       )
+      
+      if(fit[["aicc"]] < bestfit[["aicc"]]) {
+        bestfit = fit
+        bestK = K
+        bestts_7_fourier_future = ts_7_fourier_future
+      }
+      
+      return(list(best_fit = bestfit,
+                  best_k = bestK,
+                  best_ts_7_fourier_future = bestts_7_fourier_future
+                  )
+             )
+    }
+    
+    return()
+  }
+
+```
+  
+    
+  Now I create the function to run the basic prophet model (based just on `el_rides`.
+```{r}
+
+# prophet
+fit_model_prophet <-
+  function(x, ...) {
+    
+    # Create train, validation, & test sets
+        dat_trn_vld = analysis(x)
+        
+        tot_rows_trn_vld = dat_trn_vld %>% nrow()
+    
+        splt_rows = round(tot_rows_trn_vld * 0.70)
+    
+        df_trn = dat_trn_vld[1:splt_rows, , drop = FALSE]
+        
+        df_val = dat_trn_vld[(splt_rows + 1):tot_rows_trn_vld, , drop = FALSE]
+        
+        df_tst = assessment(x)
+        
+        full_data = bind_rows(df_trn %>% add_column(key = "training"),
+                              df_val %>% add_column(key = "valid"),
+                              df_tst %>% add_column(key = "test")
+                              )
+        
+        pred_rows = nrow(df_val) + nrow(df_tst)
+        
+        
+    # Create the prophet model
+        
+        prophet =
+          df_trn %>% 
+          select(time_rnd,
+                 bikes_avail_now
+                 ) %>% 
+          dplyr::rename(ds = time_rnd,
+                        y = bikes_avail_now
+                        ) %>% 
+          prophet(...)
+    
+        
+    # return
+        list_return = list(prophet = prophet,
+                           pred_rows = pred_rows,
+                           full_data = full_data
+                           )
+        return(list_return)
+    
+  }
+
+```
+
+  Now I create the function to run the basic prophet model, with the addition of external regressors.
+```{r}
+
+# prophet
+fit_model_prophet_add_regrs <-
+  function(x, ...) {
+    dat =
+      x %>% 
+      analysis() %>% 
+      select(time_rnd,
+             bikes_avail_now,
+             wday.lbl.Monday
+             ) %>% 
+      dplyr::rename(ds = time_rnd,
+                    y = bikes_avail_now
+                    )
+    
+    m = prophet(...)
+    
+    m = add_regressor(m, "wday.lbl.Monday")
+    
+    m = fit.prophet(m, dat)
+  }
+
+```
+
+
+### Run Models
+
+#### Arima-Based Model  
+  **Need to review this:**  [http://www.business-science.io/code-tools/2018/04/08/introducing-anomalize.html](http://www.business-science.io/code-tools/2018/04/08/introducing-anomalize.html) for anomaly detection.
+    
+  Can also use any other modeling methods (e.g., prophet), and then use the outlier detection method twitter used (Generalized ESD) on the remainder. **See:**  [https://www.rdocumentation.org/packages/EnvStats/versions/2.3.0/topics/rosnerTest](https://www.rdocumentation.org/packages/EnvStats/versions/2.3.0/topics/rosnerTest) for the algorithm used outside of `AnomalyDetection::AnomalyDetectionTs`.  
+    
+  Here I run the basic `forecast::auto.arima` model.
+```{r}
+
+# user   system  elapsed 
+# 1001.467   21.414 1036.904
+# ~ 17 min
+message("arima")
+# start <- proc.time()
+# models <-
+#   pmap(.l = list(a = roll_rs),
+#        .f = function(a) {
+# 
+#          splits_a = a$splits %>%
+#            map(fit_model_arima)
+# 
+#          a$arima = splits_a
+# 
+#          return(a)
+#          }
+#        )
+
+arima_1_split <-
+  roll_rs$`10`$splits[[1]] %>% fit_model_arima()
+arima_1_split
+
+time.arima <- proc.time() - start
+time.arima
+
+```
+  
+    
+  Here I run the `forecast::auto.arima` model with external regressors.
+```{r}
+ 
+# user  system elapsed 
+# 626.467  26.937 673.471
+# ~ 11 min
+message("arima_xreg")
+start <- proc.time()
+# models <-
+#   pmap(.l = list(a = models),
+#        .f = function(a) {
+# 
+#          splits_a_xreg = a$splits %>%
+#            map(fit_model_arima_xreg)
+# 
+#          a$arima_xreg = splits_a_xreg
+# 
+#          return(a)
+#          }
+#        )
+
+arima_xreg_1_split <-
+  roll_rs$`10`$splits[[1]] %>% fit_model_arima_xreg()
+arima_xreg_1_split
+
+time.arima_xreg <- proc.time() - start
+time.arima_xreg
+```
+  
+    
+  Here I run the basic `prophet::prophet` model
+```{r}
+
+# user   system  elapsed 
+# 3223.964    5.736 3228.870
+# ~ 54 minutes for two station_id values
+
+message("prophet")
+start <- proc.time()
+mod_prophet <-
+  pmap(.l = list(a = roll_rs),
+       .f = function(a) {
+
+         splits_p = a$splits %>%
+           map(fit_model_prophet)
+
+         a$prophet_mod = splits_p
+
+         return(a)
+         }
+       )
+
+time.prophet <- proc.time() - start
+time.prophet
+
+
+saveRDS(mod_prophet,
+        paste0(wd,
+               "/Models/",
+               "mod_prophet.Rds"
+               )
+        )
+
+# mod_prophet <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "mod_prophet.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  Here I run the `prophet::prophet` model that includes an additional regressor for "Monday" as a test.
+```{r}
+
+# user  system elapsed 
+#  35.327   3.401  47.577
+message("prophet_hol")
+start <- proc.time()
+# models <-
+#   pmap(.l = list(a = models),
+#        .f = function(a) {
+# 
+#          splits_p_hol = a$splits %>%
+#            map(fit_model_prophet_add_regrs)
+# 
+#          a$prophet_hol <- splits_p_hol
+# 
+#          return(a)
+#          }
+#        )
+
+prophet_add_mon_regressor <-
+  roll_rs$`10`$splits[[1]] %>% fit_model_prophet_add_regrs()
+prophet_add_mon_regressor
+
+time.prophet_hol <- proc.time() - start
+time.prophet_hol
+
+```
+
+
+
+```{r}
+
+run_times <- list(arima = as.list(time.arima),
+                  arima_xreg = as.list(time.arima_xreg),
+                  prophet = as.list(time.prophet),
+                  prophet_hol = as.list(time.prophet_hol)
+                  )
+run_times
+
+# saving is done to avoid having to run the models again
+saveRDS(models,
+        paste0(wd,
+               "/Models/",
+               "models.Rds"
+               )
+        )
+# models <-
+#   readRDS(paste0(wd,
+#                  "/Data_Processed/",
+#                  "models.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  Create the `Prophet` forecasts and plots - these will be used for measuring model accuracy (below). Here I create the future prophet dataset.
+```{r}
+
+mod_prophet <-
+  pmap(.l = list(a = mod_prophet),
+       .f = function(a) {
+         
+         splits_p_future =
+           pmap(.l = list(b = a$prophet_mod),
+                .f = function(b) {
+                  make_future_dataframe(m = b$prophet,
+                                        periods = b$pred_rows,
+                                        freq = (60 * 5) # 5 min intervals
+                                        )
+                  }
+                )
+         
+         a$prophet.future <- splits_p_future
+         
+         return(a)
+         }
+       )
+
+length(mod_prophet$`10`$prophet.future)
+
+```  
+  
+    
+  And now I can create the prohpet forecasts. First, the basic prophet forecast.
+```{r}
+
+# user    system   elapsed 
+# 15395.248 22280.912  7883.235
+# ~ 131 min
+start <- proc.time()
+mod_prophet <-
+  pmap(.l = list(a = mod_prophet),
+       .f = function(a) {
+         splits_p_m =
+           a$prophet_mod
+         
+         splits_p_future =
+           a$prophet.future
+         
+         splits_p_forecast =
+           pmap(.l = list(b = splits_p_m,
+                          c = splits_p_future
+                          ),
+                .f = function(b, c) {
+                  predict(b$prophet, c)
+                  }
+                )
+         
+         a$prophet.forecast = splits_p_forecast
+         
+         return(a)
+         }
+       )
+
+time.prophet.forecast <- proc.time() - start
+time.prophet.forecast
+
+
+saveRDS(mod_prophet,
+        paste0(wd,
+               "/Models/",
+               "mod_prophet.Rds"
+               )
+        )
+
+# mod_prophet <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "mod_prophet.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  And now the prophet forecast including holidays.
+```{r}
+
+# user  system elapsed 
+# 792.629  78.698 881.271
+# ~ 15 min
+start <- proc.time()
+prophet.forecast <-
+  pmap(.l = list(a = prophet.forecast),
+       .f = function(a) {
+         splits_p_hol_m =
+           a$prophet_hol
+         
+         splits_p_hol_future =
+           a$prophet_hol.future
+         
+         splits_p_hol_forecast =
+           pmap(.l = list(b = splits_p_hol_m,
+                          c = splits_p_hol_future
+                          ),
+                .f = function(b, c) {
+                  predict(b, c) %>% 
+                    # if_else is needed to prevent any negative predictions
+                    mutate(yhat_zero_floor = if_else(yhat < 0,
+                                                     0,
+                                                     yhat
+                                                     )
+                           )
+                  }
+                )
+         
+         a$prophet_hol.forecast = splits_p_hol_forecast
+         
+         return(a)
+         }
+       )
+time.prophet_hol.forecast <- proc.time() - start
+time.prophet_hol.forecast
+
+```
+  
+    
+  Now I simply update the `run_times` dataset with the relevant prophet info, and the relvant info from the random forest and xgboost models.
+```{r}
+
+run_times[5:6] <-
+  list(prophet.forecast = as.list(time.prophet.forecast),
+       prophet_hol.forecast = as.list(time.prophet_hol.forecast)
+       )
+names(run_times)[5:6] <- c("prophet.forecast", "prophet_hol.forecast")
+run_times[7:8] <-
+  list(rf_corr_no = as.list(time.Rf.corr_no),
+       xgbtree_corr_yes = as.list(time.Xgbtree.corr_yes)
+       )
+  
+names(run_times)[7:8] <- c("rf_corr_no", "xgbtree_corr_yes")
+str(run_times)
+
+# saving is done to avoid having to run the forecasts again
+saveRDS(run_times,
+        paste0(wd,
+               "/Models/",
+               "run_times.Rds"
+               )
+        )
+
+# run_times <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "run_times.Rds"
+#                  )
+#           )
+
+rm(time.Rf.corr_no, time.Xgbtree.corr_yes)
+
+```
+  
+    
+  And now I can create the prophet plots of components.
+```{r}
+
+prophet_plot_components(mod_prophet$`10`$prophet_mod[[1]]$prophet,
+                        mod_prophet$`10`$prophet.forecast[[1]]
+                        )
+
+```
+  
+    
+  Calculating the error metrics on the validation data. First, we create the by-row error.
+```{r}
+
+mod_prophet <-
+  pmap(.l = list(a = mod_prophet),
+       .f = function(a) {
+         p_mod = a$prophet_mod
+         fcast = a$prophet.forecast
+         
+         error_tbl =
+           pmap(.l = list(b = p_mod,
+                          c = fcast
+                          ),
+                .f = function(b, c) {
+                  tbl_valid = b$full_data %>% 
+                    filter(key == "valid") %>% 
+                    select(station_id, time_rnd, bikes_avail_now)
+                  
+                  preds = c %>% select(ds, yhat)
+                  
+                  error_tbl = tbl_valid %>% 
+                    left_join(y = preds,
+                              by = c("time_rnd" = "ds")
+                              ) %>% 
+                    dplyr::rename(actual = bikes_avail_now,
+                                  pred = yhat
+                                  ) %>% 
+                    mutate(pred_rnd = round(pred),
+                           error = actual - pred_rnd,
+                           error_pct = error / actual
+                           )
+                  
+                  return(error_tbl)
+                  }
+                )
+         
+         a$error_tbl = error_tbl
+         
+         return(a)
+         }
+       )
+
+
+saveRDS(mod_prophet,
+        paste0(wd,
+               "/Models/",
+               "mod_prophet.Rds"
+               )
+        )
+
+# mod_prophet <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "mod_prophet.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  Next, we create the summary stats of the error metrics.
+```{r}
+
+error_sum_stats <-
+  pmap(.l = list(a = mod_prophet),
+       .f = function(a) {
+         error_tbl = a$error_tbl
+         
+         sum_stats =
+           pmap(.l = list(b = error_tbl),
+                .f = function(b) {
+                  b %>% 
+                    summarise(mae = mean(abs(error), na.rm = TRUE),
+                              mse = mean(error^2, na.rm = TRUE),
+                              rmse = sqrt(mse),
+                              mape = mean(abs(error_pct), na.rm = TRUE)
+                              )
+                  }
+                )
+         }
+       )
+
+
+error_sum_stats_mean <-
+  pmap(.l = list(a = error_sum_stats,
+                 b = names(error_sum_stats)
+                 ),
+       .f = function(a, b) {
+         df = bind_rows(a)
+         
+         means = df %>% 
+           summarise(station_id = b,
+                     mae_mean = mean(mae, na.rm = TRUE),
+                     mse_mean = mean(mse, na.rm = TRUE),
+                     rmse_mean = mean(rmse, na.rm = TRUE),
+                     mape_mean = mean(mape, na.rm = TRUE)
+                     )
+         }
+       )
+
+error_sum_stats_mean %>% 
+  bind_rows()
+
+
+saveRDS(error_sum_stats_mean,
+        paste0(wd,
+               "/Models/",
+               "error_sum_stats_mean.Rds"
+               )
+        )
+
+# error_sum_stats_mean <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "error_sum_stats_mean.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  Looking at an example "actual" vs. "pred" plot.
+```{r}
+
+mod_prophet$`10`$error_tbl[[10]]$time_rnd %>% min()
+mod_prophet$`10`$error_tbl[[10]]$time_rnd %>% max()
+
+
+mod_prophet$`10`$error_tbl[[10]] %>% 
+  gather(key = "key",
+         value = "value",
+         actual,
+         pred_rnd
+         ) %>% 
+  ggplot(aes(x = time_rnd, y = value, color = key)) +
+        geom_line() +
+        coord_cartesian(
+          xlim = c(as_datetime("2014-09-06 00:00:00",
+                                             tz = "America/Los_Angeles"
+                                             ),
+                                 as_datetime("2014-09-08 00:00:00",
+                                             tz = "America/Los_Angeles"
+                                             )
+                                 ),
+                        ylim = c(0, 8)
+                        ) +
+        scale_y_continuous(breaks = seq(0, 8, 2)) +
+        theme_minimal() +
+        theme(legend.position = "bottom")
+
+
+```
+
+
