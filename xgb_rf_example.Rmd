@@ -1,0 +1,962 @@
+---
+title: "Step 03: Models - Random Forest and XGBoost"
+output:
+  html_document:
+    df_print: paged
+---
+  
+## Setup    
+  Load the relevant libraries.
+```{r, message=FALSE, warning=FALSE}
+
+# rm(list = ls())
+# .rs.restartR()
+
+
+# data manipulation
+library("plyr")
+library("tidyverse")
+library("magrittr")
+library("data.table")
+library("lubridate")
+# library("sqldf")
+
+
+# time series specific packages
+library("timetk")
+library("zoo")
+library("tibbletime")
+
+
+# modeling
+# library("fpp2")
+# library("prophet")
+library("caret")
+library("randomForest")
+library("xgboost")
+# library("h2o")
+# library("keras")
+# use_session_with_seed(123456789) # setting the seed to obtain reproducible results
+# see https://keras.rstudio.com/articles/faq.html#how-can-i-obtain-reproducible-results-using-keras-during-development and https://cran.r-project.org/web/packages/keras/vignettes/faq.html
+# can also re-enable gpu and parallel processing by using:  use_session_with_seed(42, disable_gpu = FALSE, disable_parallel_cpu = FALSE)
+
+
+
+# other
+# library("geosphere")          # specific for distance calculations from lat-lon pairs
+# library("naniar")             # inspecting missing data
+library("rlang")              # building functions
+library("recipes")            # used in Keras modeling to design matrices
+library("rsample")            # rolling samples for validation stats
+# library("tfruns")             # used in Keras modeling for trainin runs
+# library("stringr")            # string manipulation
+library("ggplot2")            # viz
+library("sweep")              # more easily pull out model statistics
+library("yardstick")          # easily calculate accuracy stats
+library("doParallel")         # parallel processing
+
+```
+  
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+  
+    
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+opts_knit$set(root.dir = "/Users/mdturse/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+
+
+#### Accuracy Metrics
+   
+  I'll try both `caret::randomForest` and `caret::xgboost` on the dataset USING dummy variables. But first, I need to create some custom accuracy metrics.
+```{r}
+
+func_custom_accuracy_metrics <-
+  function(data, lev = NULL, model = NULL) {
+    mae =
+      function(actual, predicted) {
+        mean(abs((actual - predicted)
+                 ),
+             na.rm = TRUE
+             )
+        }
+    
+    mape =
+      function(actual, predicted) {
+        mean(abs((actual - predicted) / actual * 100),
+             na.rm = TRUE
+             )
+        }
+    
+    rmse =
+      function(actual, predicted) {
+        sqrt(mean((actual - predicted)^2,
+                  na.rm = TRUE
+                  )
+             )
+        }
+    
+    r2 =
+      function(actual, predicted) {
+        1 - (sum((actual - predicted)^2
+                 ) / sum((actual - mean(actual)
+                          )^2
+                         )
+             )
+    }
+    
+    
+    out = c(mae(data$obs,
+                data$pred
+                ),
+            mape(data$obs,
+                 data$pred
+                 ),
+            rmse(data$obs,
+                 data$pred
+                 ),
+            r2(data$obs,
+               data$pred
+               )
+            )
+
+    
+    names(out) = c("MAE", "MAPE", "RMSE", "R2")
+    
+    out
+    }
+
+
+saveRDS(func_custom_accuracy_metrics,
+        paste0(wd,
+               "/Data/Interim/",
+               "func_custom_accuracy_metrics.Rds"
+               )
+        )
+
+# func_custom_accuracy_metrics <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "func_custom_accuracy_metrics.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  Limit the base dataset.
+```{r}
+
+lmtd_vars_lag3 <- lmtd_vars_lag3 %>% 
+  map(~select(.x,
+              station_id:minute.55
+              )
+      )
+
+names(lmtd_vars_lag3)
+lmtd_vars_lag3$`10` %>% class()
+lmtd_vars_lag3$`10` %>% glimpse()
+
+```
+
+
+#### Variable Reduction  
+  
+  First, limit to just training data.
+```{r}
+
+DV_train_data <-
+  lmtd_vars_lag3 %>% 
+  map(~ filter(.x,
+               data_type == "01_train"
+               )
+      )
+
+DV_valid_data <-
+  lmtd_vars_lag3 %>% 
+  map(~ filter(.x,
+               data_type == "02_valid"
+               )
+      )
+
+
+message("DV_train_data")
+DV_train_data$`10` %>% glimpse()
+
+message("DV_valid_data")
+DV_valid_data$`10` %>% dim()
+
+```
+
+
+  Now I reduce the number of variables by using `caret::nearZeroVar` and `caret::corr`. This is done individually as `caret` will not handle a variable of zero standard deviation.  
+    
+  First, I use `caret::nearZeroVar` to remove variables with "near zero variance.
+```{r}
+
+DV_nzv_list <-
+  DV_train_data %>%
+  map(~ preProcess(.x,
+                   # method = c("nzv", "corr", "center", "scale", "medianImpute"),
+                   method = "nzv"
+                   )
+      )
+
+DV_nzv_predict <-
+  map2(.x = DV_nzv_list,
+       .y = DV_train_data,
+       .f = function(a, b) {
+         predict(a, b)
+         }
+       )
+
+
+message("before reduction")
+DV_train_data %>%
+  map(~ dim(.x)
+      )
+
+DV_train_data$`10` %>%
+  glimpse()
+
+
+message("after near-zero variable reduction")
+DV_nzv_predict %>%
+  map(~ dim(.x)
+      )
+
+DV_nzv_predict$`10` %>%
+  glimpse()
+
+
+rm(DV_nzv_list)
+
+```  
+
+
+  First, I use `caret::corr` to remove highly correlated variables.  **NOTE: This will remove the lages at 05, 10, and 15 minutes, which were found to be important in the H2O models, so we probably don't want to remove them here.**
+```{r}
+
+DV_corr_list <-
+  DV_nzv_predict %>%
+  map(~ preProcess(.x,
+                   # method = c("nzv", "corr", "center", "scale", "medianImpute"),
+                   method = "corr"
+                   )
+      )
+
+DV_corr_predict <-
+  map2(.x = DV_corr_list,
+       .y = DV_nzv_predict,
+       .f = function(a, b) {
+         predict(a, b)
+         }
+       )
+
+
+saveRDS(DV_corr_predict,
+        paste0(wd,
+               "/Data/Interim/",
+               "DV_corr_predict.Rds"
+               )
+        )
+
+# DV_corr_predict <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "DV_corr_predict.Rds"
+#                  )
+#           )
+
+
+message("before corr reduction")
+DV_nzv_predict %>%
+  map(~ dim(.x)
+      )
+
+DV_nzv_predict$`10` %>%
+  glimpse()
+
+
+message("after corr variable reduction")
+DV_corr_predict %>%
+  map(~ dim(.x)
+      )
+
+DV_corr_predict$`10` %>%
+  glimpse()
+
+
+rm(DV_corr_list)
+
+```  
+
+
+### Modeling Parameters  
+    
+  Modeling parameters used in multiple models.
+```{r}
+
+# period_train <- round((365 * 1.5),
+#                       digits = 0
+#                       ) + 30 # 1.5 years + 30 days of data needed for LSTM Keras modeling
+# 
+# period_test <- round((365 * 0.5),
+#                      digits = 0
+#                      ) + 30 # test on 0.5 years * 30 days of data (even though we just predict 14 days out) needed for LSTM Keras modeling
+
+
+rm(
+  # DV_nzv_predict,
+  DV_corr_predict
+  )
+
+period_train <- (12 * 24 * 365 * 0.5) # 0.5 years of training data
+period_test <- (12 * 24 * 365 * 0.25) # 0.25 years of testing data
+skip_span <- (12 * 24 * 24) # gives 10 evenly distributed  splits
+# DV_nzv_predict$`10` %>% nrow()
+
+rolling_origin_resamples <-
+  DV_train_data %>%
+  # DV_nzv_predict %>%
+  # small_test %>% 
+  map(~rolling_origin(.x,
+                      initial    = period_train,
+                      assess     = period_test,
+                      cumulative = FALSE,
+                      skip       = skip_span
+                      )
+      )
+
+rolling_origin_resamples %>% map(~nrow(.x))
+rm(rolling_origin_resamples)
+
+
+saveRDS(period_train,
+        paste0(wd,
+               "/Data/Interim/",
+               "period_train.Rds"
+               )
+        )
+
+# period_train <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "period_train.Rds"
+#                  )
+#           )
+
+saveRDS(period_test,
+        paste0(wd,
+               "/Data/Interim/",
+               "period_test.Rds"
+               )
+        )
+
+# period_test <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "period_test.Rds"
+#                  )
+#           )
+
+saveRDS(skip_span,
+        paste0(wd,
+               "/Data/Interim/",
+               "skip_span.Rds"
+               )
+        )
+
+# skip_span <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "skip_span.Rds"
+#                  )
+#           )
+
+```
+
+
+## Modeling
+
+**NOTE: `DV_corr_predict`, `DV_nzv_predict`, `func_custom_accuracy_metrics`, `period_train`, `period_test`, and `skip_span` are the outputs produced in Step 02**
+```{r}
+
+# DV_corr_predict <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "DV_corr_predict.Rds"
+#                  )
+#           )
+# 
+# DV_nzv_predict <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "DV_nzv_predict.Rds"
+#                  )
+#           )
+# 
+# func_custom_accuracy_metrics <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "func_custom_accuracy_metrics.Rds"
+#                  )
+#           )
+# 
+# period_train <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "period_train.Rds"
+#                  )
+#           )
+# 
+# period_test <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "period_test.Rds"
+#                  )
+#           )
+# 
+# skip_span <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "skip_span.Rds"
+#                  )
+#           )
+
+```  
+
+
+### Random Forest  
+  
+ Create one model with preprocessing that removes highly correlated variables, and one model that does not.
+```{r}
+
+dat_limited <-
+  DV_nzv_predict %>% 
+  map(~select(.x,
+              matches("bikes_avail_"),
+              matches("month\\.lbl\\."),
+              matches("minute\\."),
+              matches("wday\\.lbl\\.")
+              )
+      )
+
+# dat_limited %>% map(~colnames(.x))
+
+tot_cores <- detectCores()
+cl <- makeCluster(tot_cores - 1)
+registerDoParallel(cl)
+
+
+start <- proc.time()
+DV_Fit.Rf.corr_no <-
+  # DV_nzv_predict %>%
+  dat_limited %>% 
+  map(.f = function(a) {
+    fitControl =
+      trainControl(method = "timeslice",
+                   initialWindow = period_train,
+                   horizon = period_test,
+                   fixedWindow = TRUE,
+                   skip = skip_span,
+                   summaryFunction = func_custom_accuracy_metrics
+                   )
+    
+    set.seed(123456789)
+    
+    output =
+      train(bikes_avail_now ~ .,
+            data = a, #%>% 
+              # select(-station_id,
+              #        -data_type
+              #        ),
+            preProcess = c(#"nzv"
+                           #"corr"
+                           "center",
+                           "scale",
+                           "medianImpute"
+                           ),
+            na.action = na.pass,
+            method = "rf",
+            metric = "MAE",
+            maximize = FALSE,
+            importance = TRUE,
+            trControl = fitControl,
+            verbose = TRUE
+            )
+    
+    return(output)
+    }
+    )
+
+time.Rf.corr_no <- proc.time() - start
+
+message("DV_Fit.Rf.corr_no")
+DV_Fit.Rf.corr_no
+
+
+
+start <- proc.time()
+DV_Fit.Rf.corr_yes <-
+  DV_corr_predict %>%
+  map(.f = function(a) {
+    fitControl =
+      trainControl(method = "timeslice",
+                   initialWindow = period_train,
+                   horizon = period_test,
+                   fixedWindow = TRUE,
+                   skip = skip_span,
+                   summaryFunction = func_custom_accuracy_metrics
+                   )
+
+    set.seed(123456789)
+
+    output =
+      train(bikes_avail_now ~ .,
+            data = a %>% 
+              select(-station_id,
+                     -data_type
+                     ),
+            preProcess = c(#"nzv"
+                           #"corr"
+                           "center",
+                           "scale",
+                           "medianImpute"
+                           ),
+            na.action = na.pass,
+            method = "rf",
+            metric = "MAE",
+            maximize = FALSE,
+            importance = TRUE,
+            trControl = fitControl,
+            verbose = TRUE
+            )
+
+    return(output)
+    }
+    )
+
+time.Rf.corr_yes <- proc.time() - start
+
+message("DV_Fit.Rf.corr_yes")
+DV_Fit.Rf.corr_yes
+
+
+stopCluster(cl)
+rm(start, tot_cores, cl)
+
+```
+  
+    
+  Compare the results.
+```{r}
+
+# user  system elapsed 
+#  61.039   5.166 527.512 
+# ~ 9 min
+message("time.Rf.corr_yes")
+time.Rf.corr_yes
+
+# user  system elapsed 
+#  58.048   3.563 486.738
+# ~ 8 min
+message("time.Rf.corr_no")
+time.Rf.corr_no
+
+
+# Create a list of models
+Models.Rf <-
+  pmap(.l = list(a = DV_Fit.Rf.corr_yes,
+                 b = DV_Fit.Rf.corr_no
+                 ),
+       .f = function(a, b) {
+         l = list(Corr_No = a,
+                  Corr_Yes = b
+                  )
+         
+         return(l)
+         }
+       )
+
+
+# Resample the models
+Resample_Results.Rf <-
+  Models.Rf %>% 
+  map(~ resamples(.x)
+      )
+
+
+# Generate a summary
+Resample_Results.Rf %>% 
+  map(~ summary(.x)
+      )
+
+Resample_Results.Rf %>% 
+  map(~ bwplot(.x)
+      )
+
+```
+  
+    
+  After inspecting the results, we choose to keep the model that includes the correlation filter in the preprocessing stage - the results and runtimes were similar.
+```{r}
+
+rm(list = ls(pattern = "corr_yes"))
+
+
+saveRDS(DV_Fit.Rf.corr_no,
+        paste0(wd,
+               "/Models/",
+               "DV_Fit.Rf.corr_no.Rds"
+               )
+        )
+
+
+saveRDS(time.Rf.corr_no,
+        paste0(wd,
+               "/Models/",
+               "time.Rf.corr_no.Rds"
+               )
+        )
+
+
+# DV_Fit.Rf.corr_no <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "DV_Fit.Rf.corr_no.Rds"
+#                  )
+#           )
+
+# time.Rf.corr_no <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "time.Rf.corr_no.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  Inspect varialbe importance.
+```{r}
+
+# Permutation improtance is used for the variable importance
+# Based on discussion here:  http://parrt.cs.usfca.edu/doc/rf-importance/index.html
+VI <- DV_Fit.Rf.corr_no %>% 
+  map(~ varImp(.x,
+               type = 1,
+               scale = TRUE
+               )
+      )
+
+VI
+
+
+VI %>% 
+  map(~ plot(.x, top = 20)
+      )
+
+
+rm(VI)
+
+```
+
+
+### Extreme Gradient Boosted Tree
+  
+ Create one model with preprocessing that removes highly correlated variables, and one model that does not.
+```{r}
+
+tot_cores <- detectCores()
+cl <- makeCluster(tot_cores - 1)
+registerDoParallel(cl)
+
+
+start <- proc.time()
+DV_Fit.Xgbtree.corr_no <-
+  DV_nzv_predict %>%
+  # dat_limited %>% 
+  map(.f = function(a) {
+    fitControl =
+      trainControl(method = "timeslice",
+                   initialWindow = period_train,
+                   horizon = period_test,
+                   fixedWindow = TRUE,
+                   skip = skip_span,
+                   summaryFunction = func_custom_accuracy_metrics
+                   )
+    
+    set.seed(123456789)
+    
+    output =
+      train(bikes_avail_now ~ .,
+            data = a %>% 
+              select(-station_id,
+                     -data_type
+                     ),
+            preProcess = c(#"nzv"
+                           #"corr"
+                           "center",
+                           "scale",
+                           "medianImpute"
+                           ),
+            na.action = na.pass,
+            method = "xgbTree",
+            metric = "MAE",
+            maximize = FALSE,
+            importance = TRUE,
+            trControl = fitControl,
+            verbose = TRUE
+            )
+    
+    return(output)
+    }
+    )
+
+time.Xgbtree.corr_no <- proc.time() - start
+time.Xgbtree.corr_no
+
+# message("DV_Fit.Xgbtree.corr_no")
+# DV_Fit.Xgbtree.corr_no
+
+
+start <- proc.time()
+DV_Fit.Xgbtree.corr_yes <-
+  DV_corr_predict %>%
+  # dat_limited %>% 
+  map(.f = function(a) {
+    fitControl =
+      trainControl(method = "timeslice",
+                   initialWindow = period_train,
+                   horizon = period_test,
+                   fixedWindow = TRUE,
+                   skip = skip_span,
+                   summaryFunction = func_custom_accuracy_metrics
+                   )
+
+    set.seed(123456789)
+
+    output =
+      train(bikes_avail_now ~ .,
+            data = a %>% 
+              select(-station_id,
+                     -data_type
+                     ),
+            preProcess = c(#"nzv"
+                           #"corr"
+                           "center",
+                           "scale",
+                           "medianImpute"
+                           ),
+            na.action = na.pass,
+            method = "xgbTree",
+            metric = "MAE",
+            maximize = FALSE,
+            importance = TRUE,
+            trControl = fitControl,
+            verbose = TRUE
+            )
+
+    return(output)
+    }
+    )
+
+time.Xgbtree.corr_yes <- proc.time() - start
+time.Xgbtree.corr_yes
+
+# message("DV_Fit.Xgbtree.corr_yes")
+# DV_Fit.Xgbtree.corr_yes
+
+
+stopCluster(cl)
+rm(start, tot_cores, cl)
+
+```
+
+    
+  Compare the results.
+```{r}
+
+# user   system  elapsed 
+#   44.895   34.736 3714.389 
+# ~ 62 min 
+message("time.Xgbtree.corr_yes")
+time.Xgbtree.corr_yes
+
+# user   system  elapsed 
+#   67.571   35.458 3897.952  
+# ~ 65 min
+message("time.Xgbtree.corr_no")
+time.Xgbtree.corr_no
+
+
+# Create a list of models
+Models.Xgbtree <-
+  pmap(.l = list(a = DV_Fit.Xgbtree.corr_yes,
+                 b = DV_Fit.Xgbtree.corr_no
+                 ),
+       .f = function(a, b) {
+         l = list(Corr_No = a,
+                  Corr_Yes = b
+                  )
+         
+         return(l)
+         }
+       )
+
+
+# Resample the models
+Resample_Results.Xgbtree <-
+  Models.Xgbtree %>% 
+  map(~ resamples(.x)
+      )
+
+
+# Generate a summary
+Resample_Results.Xgbtree %>% 
+  map(~ summary(.x)
+      )
+
+Resample_Results.Xgbtree %>% 
+  map(~ bwplot(.x)
+      )
+
+```
+  
+    
+  After inspecting the results, we choose to keep the model that does NOT include the correlation filter in the preprocessing stage - the results were similar, and the run time was about half as long.
+```{r}
+
+# rm(list = ls(pattern = "Xgbtree.corr_yes"))
+
+
+saveRDS(DV_Fit.Xgbtree.corr_no,
+        paste0(wd,
+               "/Models/",
+               "DV_Fit.Xgbtree.corr_no.Rds"
+               )
+        )
+
+
+saveRDS(time.Xgbtree.corr_no,
+        paste0(wd,
+               "/Models/",
+               "time.Xgbtree.corr_no.Rds"
+               )
+        )
+
+saveRDS(DV_Fit.Xgbtree.corr_yes,
+        paste0(wd,
+               "/Models/",
+               "DV_Fit.Xgbtree.corr_yes.Rds"
+               )
+        )
+
+
+saveRDS(time.Xgbtree.corr_yes,
+        paste0(wd,
+               "/Models/",
+               "time.Xgbtree.corr_yes.Rds"
+               )
+        )
+
+
+
+# DV_Fit.Xgbtree.corr_no <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "DV_Fit.Xgbtree.corr_no.Rds"
+#                  )
+#           )
+# 
+# time.Xgbtree.corr_no <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "time.Xgbtree.corr_no.Rds"
+#                  )
+#           )
+# 
+# DV_Fit.Xgbtree.corr_yes <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "DV_Fit.Xgbtree.corr_yes.Rds"
+#                  )
+#           )
+# 
+# time.Xgbtree.corr_yes <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "time.Xgbtree.corr_yes.Rds"
+#                  )
+#           )
+
+```
+  
+    
+  Inspect varialbe importance.
+```{r}
+
+# Permutation improtance is used for the variable importance
+# Based on discussion here:  http://parrt.cs.usfca.edu/doc/rf-importance/index.html
+VI_no <- DV_Fit.Xgbtree.corr_no %>% 
+  map(~ varImp(.x,
+               type = 1,
+               scale = TRUE
+               )
+      )
+
+VI_no
+
+
+VI_no %>% 
+  map(~ plot(.x, top = 20)
+      )
+
+
+rm(VI_no)
+
+```
+
+
+```{r}
+
+VI_yes <- DV_Fit.Xgbtree.corr_yes %>% 
+  map(~ varImp(.x,
+               type = 1,
+               scale = TRUE
+               )
+      )
+
+VI_yes
+
+
+VI_yes %>% 
+  map(~ plot(.x, top = 20)
+      )
+
+
+rm(VI_yes)
+
+```
+
