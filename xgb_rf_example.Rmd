@@ -19,7 +19,7 @@ library("tidyverse")
 library("magrittr")
 library("data.table")
 library("lubridate")
-library("sqldf")
+# library("sqldf")
 
 
 # time series specific packages
@@ -29,13 +29,13 @@ library("tibbletime")
 
 
 # modeling
-library("fpp2")
-library("prophet")
+# library("fpp2")
+# library("prophet")
 library("caret")
 library("randomForest")
 library("xgboost")
-library("h2o")
-library("keras")
+# library("h2o")
+# library("keras")
 # use_session_with_seed(123456789) # setting the seed to obtain reproducible results
 # see https://keras.rstudio.com/articles/faq.html#how-can-i-obtain-reproducible-results-using-keras-during-development and https://cran.r-project.org/web/packages/keras/vignettes/faq.html
 # can also re-enable gpu and parallel processing by using:  use_session_with_seed(42, disable_gpu = FALSE, disable_parallel_cpu = FALSE)
@@ -43,13 +43,13 @@ library("keras")
 
 
 # other
-library("geosphere")          # specific for distance calculations from lat-lon pairs
-library("naniar")             # inspecting missing data
+# library("geosphere")          # specific for distance calculations from lat-lon pairs
+# library("naniar")             # inspecting missing data
 library("rlang")              # building functions
 library("recipes")            # used in Keras modeling to design matrices
 library("rsample")            # rolling samples for validation stats
-library("tfruns")             # used in Keras modeling for trainin runs
-library("stringr")            # string manipulation
+# library("tfruns")             # used in Keras modeling for trainin runs
+# library("stringr")            # string manipulation
 library("ggplot2")            # viz
 library("sweep")              # more easily pull out model statistics
 library("yardstick")          # easily calculate accuracy stats
@@ -71,7 +71,7 @@ sessionInfo()
 
 require("knitr")
 
-opts_knit$set(root.dir = "/Users/mdturse/Dropbox/_AWS/SF_Bikeshare_Status/")
+opts_knit$set(root.dir = "/Users/mdturse/Dropbox/_AWS/Bikeshare_Status_SF/")
 
 ```
   
@@ -164,157 +164,47 @@ saveRDS(func_custom_accuracy_metrics,
 ```
   
     
-  Get the base dataset.
+  Limit the base dataset.
 ```{r}
 
-id_split <-
-  read_rds(path = paste0(wd,
-                         "/Data/Interim/",
-                         "id_split.rds"
-                         )
-           )
+lmtd_vars_lag3 <- lmtd_vars_lag3 %>% 
+  map(~select(.x,
+              station_id:minute.55
+              )
+      )
 
-id_split <- id_split[1:2]
-
-id_split$`10` %>% 
-  str()
-
-
-# pmap(.l = list(a = id_split,
-#                b = names(id_split)
-#                ),
-#      .f = function(a, b) {
-#        message(b)
-#        
-#        str(a)
-#        }
-#      )
-
-# View(id_split$`10` %>% head(1000))
-
-```
-  
-    
-  One-hot enconde the data.
-```{r}
-
-one_hot <-
-  pmap(.l = list(a = id_split),
-       .f = function(a) {
-         df = select(a,
-                     -station_id,
-                     -row_num,
-                     -data_type
-                     )
-         
-         dmy = dummyVars(bikes_avail_now ~ ., data = df)
-         
-         return(dmy)
-         }
-       )
-
-
-id_split_one_hot <-
-  pmap(.l = list(a = one_hot,
-                 b = id_split
-                 ),
-       .f = function(a, b) {
-         b %>%
-           select(station_id,
-                  data_type,
-                  bikes_avail_now
-                  ) %>% 
-           bind_cols(predict(object = a,
-                             newdata = b %>% 
-                               select(-station_id,
-                                      -row_num,
-                                      -data_type,
-                                      )
-                             ) %>% 
-                       as.data.frame()
-                     ) %>% 
-           arrange(station_id,
-                   time_rnd
-                   ) %>% 
-           select(-time_rnd)
-         }
-       )
-
-class(id_split_one_hot$`10`)
-glimpse(id_split_one_hot$`10`)
-# View(id_split_one_hot$`10` %>% head(100))
-
-
-rm(one_hot)
+names(lmtd_vars_lag3)
+lmtd_vars_lag3$`10` %>% class()
+lmtd_vars_lag3$`10` %>% glimpse()
 
 ```
 
 
 #### Variable Reduction  
   
-  First, limit to just training data, and confirm the datasets to use are the same (except for the one-hot-encoding producing dummy variables).
+  First, limit to just training data.
 ```{r}
 
-train_data <-
-  id_split %>% 
-  map(~ filter(.x,
-               data_type == "01_train"
-               )
-      )
-
 DV_train_data <-
-  id_split_one_hot %>% 
+  lmtd_vars_lag3 %>% 
   map(~ filter(.x,
                data_type == "01_train"
                )
       )
 
-
-saveRDS(train_data,
-        paste0(wd,
-               "/Models/",
-               "train_data.Rds"
+DV_valid_data <-
+  lmtd_vars_lag3 %>% 
+  map(~ filter(.x,
+               data_type == "02_valid"
                )
-        )
-
-# train_data <-
-#   readRDS(paste0(wd,
-#                  "/Models/",
-#                  "train_data.Rds"
-#                  )
-#           )
-
-saveRDS(DV_train_data,
-        paste0(wd,
-               "/Models/",
-               "DV_train_data.Rds"
-               )
-        )
-
-# DV_train_data <-
-#   readRDS(paste0(wd,
-#                  "/Models/",
-#                  "DV_train_data.Rds"
-#                  )
-#           )
-
-
-message("train_data")
-train_data %>% 
-  map(~ dim(.x)
       )
 
-message("DV_train_data")
-DV_train_data %>% 
-  map(~ dim(.x)
-      )
-
-
-message("train_data")
-train_data$`10` %>% glimpse()
 
 message("DV_train_data")
 DV_train_data$`10` %>% glimpse()
+
+message("DV_valid_data")
+DV_valid_data$`10` %>% dim()
 
 ```
 
@@ -339,21 +229,6 @@ DV_nzv_predict <-
          predict(a, b)
          }
        )
-
-
-saveRDS(DV_nzv_predict,
-        paste0(wd,
-               "/Data/Interim/",
-               "DV_nzv_predict.Rds"
-               )
-        )
-
-# DV_nzv_predict <-
-#   readRDS(paste0(wd,
-#                  "/Data/Interim/",
-#                  "DV_nzv_predict.Rds"
-#                  )
-#           )
 
 
 message("before reduction")
@@ -451,12 +326,18 @@ rm(DV_corr_list)
 #                      ) + 30 # test on 0.5 years * 30 days of data (even though we just predict 14 days out) needed for LSTM Keras modeling
 
 
-period_train <- (6 * 24 * 365 * 1) # 1.0 years of training data
-period_test <- (6 * 24 * 365 * 0.5) # 0.5 years of testing data
-skip_span <- (6 * 24 * 50) # gives 10 evenly distributed  splits
+rm(
+  # DV_nzv_predict,
+  DV_corr_predict
+  )
+
+period_train <- (12 * 24 * 365 * 0.5) # 0.5 years of training data
+period_test <- (12 * 24 * 365 * 0.25) # 0.25 years of testing data
+skip_span <- (12 * 24 * 24) # gives 10 evenly distributed  splits
 # DV_nzv_predict$`10` %>% nrow()
 
 rolling_origin_resamples <-
+  # DV_train_data %>% 
   DV_nzv_predict %>%
   map(~rolling_origin(.x,
                       initial    = period_train,
@@ -511,6 +392,7 @@ saveRDS(skip_span,
 #                  "skip_span.Rds"
 #                  )
 #           )
+
 ```
 
 
