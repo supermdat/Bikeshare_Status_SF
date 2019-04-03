@@ -126,6 +126,8 @@ combo <-
          }
        )
 
+# combo <- combo[1:2]
+
 message("combo")
 combo$`10` %>% glimpse()
 
@@ -365,7 +367,8 @@ fit_model_prophet <-
   }
 
 ```
-
+  
+    
   Now I create the function to run the basic prophet model, with the addition of external regressors.
 ```{r}
 
@@ -464,18 +467,23 @@ time.arima_xreg
   Here I run the basic `prophet::prophet` model
 ```{r}
 
+# library("furrr")
+# plan(multiprocess)
+
 # user   system  elapsed 
-# 3223.964    5.736 3228.870
-# ~ 54 minutes for two station_id values
+# 3257.644    5.784 3262.864
+# ~ 54 minutes for all station_id values
 
 message("prophet")
 start <- proc.time()
 mod_prophet <-
   pmap(.l = list(a = roll_rs),
+  # future_pmap(.l = list(a = roll_rs),
        .f = function(a) {
 
          splits_p = a$splits %>%
            map(fit_model_prophet)
+           # future_map(fit_model_prophet)
 
          a$prophet_mod = splits_p
 
@@ -500,6 +508,9 @@ saveRDS(mod_prophet,
 #                  "mod_prophet.Rds"
 #                  )
 #           )
+
+
+rm(roll_rs)
 
 ```
   
@@ -564,11 +575,16 @@ saveRDS(models,
   Create the `Prophet` forecasts and plots - these will be used for measuring model accuracy (below). Here I create the future prophet dataset.
 ```{r}
 
+# user    system   elapsed 
+# 15521.020 22309.876  7917.699
+# ~ 132 min
 mod_prophet <-
   pmap(.l = list(a = mod_prophet),
+  # future_pmap(.l = list(a = mod_prophet),
        .f = function(a) {
          
          splits_p_future =
+           # future_pmap(.l = list(b = a$prophet_mod),
            pmap(.l = list(b = a$prophet_mod),
                 .f = function(b) {
                   make_future_dataframe(m = b$prophet,
@@ -732,6 +748,23 @@ prophet_plot_components(mod_prophet$`10`$prophet_mod[[1]]$prophet,
   Calculating the error metrics on the validation data. First, we create the by-row error.
 ```{r}
 
+# mod_prophet$`10`$prophet.future[[1]] %>% dim()
+# mod_prophet$`10`$prophet_mod[[1]]$full_data %>% dim()
+# 
+# mod_prophet$`10`$prophet.future[[1]] %>% str()
+# mod_prophet$`10`$prophet_mod[[1]]$full_data %>% str()
+# mod_prophet$`10`$prophet_mod[[1]]$full_data %>% dplyr::count(key)
+# 
+# mod_prophet$`10`$prophet.future[[1]]$ds %>% summary()
+# mod_prophet$`10`$prophet_mod[[1]]$full_data$time_rnd %>% summary()
+# mod_prophet$`10`$prophet_mod[[1]]$full_data %>% filter(key == "test") %>% select(time_rnd) %>% summary()
+# 
+# mod_prophet$`10`$prophet.future[[1]]$ds %>% head(100) %>% as.data.frame() %>% 
+#   bind_cols(mod_prophet$`10`$prophet_mod[[1]]$full_data$time_rnd %>% head(100) %>% as.data.frame()
+#             ) %>% 
+#   View()
+
+
 mod_prophet <-
   pmap(.l = list(a = mod_prophet),
        .f = function(a) {
@@ -744,7 +777,8 @@ mod_prophet <-
                           ),
                 .f = function(b, c) {
                   tbl_valid = b$full_data %>% 
-                    filter(key == "valid") %>% 
+                    # filter(key == "valid") %>% 
+                    filter(key == "test") %>% 
                     select(station_id, time_rnd, bikes_avail_now)
                   
                   preds = c %>% select(ds, yhat)
@@ -853,11 +887,15 @@ saveRDS(error_sum_stats_mean,
   Looking at an example "actual" vs. "pred" plot.
 ```{r}
 
-mod_prophet$`10`$error_tbl[[10]]$time_rnd %>% min()
-mod_prophet$`10`$error_tbl[[10]]$time_rnd %>% max()
+mod_prophet$`10`$error_tbl[[1]]$time_rnd %>% min()
+mod_prophet$`10`$error_tbl[[1]]$time_rnd %>% max()
+# mod_prophet$`10`$error_tbl[[1]]$pred_rnd %>% summary()
+# mod_prophet$`10`$error_tbl[[1]] %>% 
+#   filter(is.na(pred_rnd)) %>% 
+#   select(time_rnd) %>% 
+#   summary()
 
-
-mod_prophet$`10`$error_tbl[[10]] %>% 
+mod_prophet$`10`$error_tbl[[1]] %>% 
   gather(key = "key",
          value = "value",
          actual,
@@ -866,16 +904,16 @@ mod_prophet$`10`$error_tbl[[10]] %>%
   ggplot(aes(x = time_rnd, y = value, color = key)) +
         geom_line() +
         coord_cartesian(
-          xlim = c(as_datetime("2014-09-06 00:00:00",
+          xlim = c(as_datetime("2014-05-25 00:00:00",
                                              tz = "America/Los_Angeles"
                                              ),
-                                 as_datetime("2014-09-08 00:00:00",
+                                 as_datetime("2014-05-26 00:00:00",
                                              tz = "America/Los_Angeles"
                                              )
                                  ),
-                        ylim = c(0, 8)
+                        ylim = c(0, 25)
                         ) +
-        scale_y_continuous(breaks = seq(0, 8, 2)) +
+        scale_y_continuous(breaks = seq(0, 25, 5)) +
         theme_minimal() +
         theme(legend.position = "bottom")
 
