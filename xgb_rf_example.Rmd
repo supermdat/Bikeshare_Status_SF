@@ -337,9 +337,8 @@ skip_span <- (12 * 24 * 24) # gives 10 evenly distributed  splits
 # DV_nzv_predict$`10` %>% nrow()
 
 rolling_origin_resamples <-
-  DV_train_data %>%
-  # DV_nzv_predict %>%
-  # small_test %>% 
+  # DV_train_data %>% 
+  DV_nzv_predict %>%
   map(~rolling_origin(.x,
                       initial    = period_train,
                       assess     = period_test,
