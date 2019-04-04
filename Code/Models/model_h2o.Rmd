@@ -218,6 +218,9 @@ names(lmtd_vars_lag3)
 lmtd_vars_lag3$`10` %>% class()
 lmtd_vars_lag3$`10` %>% glimpse()
 
+
+rm(small_test)
+
 ```
   
     
@@ -272,9 +275,9 @@ tbl_train <-
                  ),
        .f = function(a, b) {
          dat = a[1:b, ] %>% 
-           select(-station_id,
+           select(#-station_id,
                   -data_type,
-                  -time_rnd,
+                  #-time_rnd,
                   -row_num
                   )
          }
@@ -287,9 +290,9 @@ tbl_valid <-
                  ),
        .f = function(a, b, c) {
          dat = a[(b + 1):c, ] %>% 
-           select(-station_id,
+           select(#-station_id,
                   -data_type,
-                  -time_rnd,
+                  #-time_rnd,
                   -row_num
                   )
          }
@@ -302,9 +305,9 @@ tbl_test <-
                  ),
        .f = function(a, b, c) {
          dat = a[(b + 1):c, ] %>% 
-           select(-station_id,
+           select(#-station_id,
                   -data_type,
-                  -time_rnd,
+                  #-time_rnd,
                   -row_num
                   )
          }
@@ -314,13 +317,13 @@ tbl_test <-
 rm(num_rows, splt_pt_train, splt_pt_valid)
 
 
-# valid_data is what will be used to compare all model types
+# valid_data is what will be used to compare models
 valid_data <-
   lmtd_vars_lag3 %>% 
   map(~filter(.x, data_type == "02_valid") %>% 
-        select(-station_id,
+        select(#-station_id,
                -data_type,
-               -time_rnd,
+               #-time_rnd,
                -row_num
                )
       )
@@ -340,13 +343,11 @@ h2o.no_progress() # Turn off progress bars
   Convert to the datasets to h2o objects.
 ```{r}
 
-train_h2o <- tbl_train %>% map(~as.h2o(.x))
-valid_h2o <- tbl_valid %>% map(~as.h2o(.x))
-test_h2o  <- tbl_test %>% map(~as.h2o(.x))
+train_h2o <- tbl_train %>% map(~as.h2o(.x %>% select(-station_id, -time_rnd)))
+valid_h2o <- tbl_valid %>% map(~as.h2o(.x %>% select(-station_id, -time_rnd)))
+test_h2o  <- tbl_test %>% map(~as.h2o(.x %>% select(-station_id, -time_rnd)))
 
-valid_data_h2o  <- valid_data %>% map(~as.h2o(.x))
-
-
+valid_data_h2o  <- valid_data %>% map(~as.h2o(.x %>% select(-station_id, -time_rnd)))
 # rm(tbl_train, tbl_valid, tbl_test)
 
 ```
@@ -381,8 +382,8 @@ x <- train_h2o %>%
 
 
 # user   system  elapsed 
-#   82.212   26.563 7291.869 
-# ~ 2 hours
+#   78.452   29.624 7759.806 
+# ~ 2 hours 9 min
 start <- proc.time()
 
 automl_models_h2o <-
@@ -561,13 +562,32 @@ saveRDS(pred_h2o,
   Look at performance stats using the test data.
 ```{r}
 
-pmap(.l = list(a = automl_leader,
+perf_stats_test_h2o <-
+  pmap(.l = list(a = automl_leader,
                b = test_h2o
                ),
      .f = function(a, b) {
        h2o.performance(a, newdata = b)
        }
      )
+
+perf_stats_test_h2o
+
+
+# save as a .rds file
+saveRDS(perf_stats_test_h2o,
+        paste0(wd,
+               "/Models/",
+               "perf_stats_test_h2o.rds"
+               )
+        )
+
+# perf_stats_test_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "perf_stats_test_h2o.rds"
+#                          )
+#            )
 
 ```
   
@@ -579,7 +599,7 @@ error_tbl_h2o <-
   pmap(.l = list(a = tbl_test,
                  b = pred_h2o
                  ),
-       .f = function(a, b) {
+       .f = function(a, b, c) {
          a %>% 
            add_column(pred = b %>% as_tibble() %>% pull(predict)) %>% 
            rename(actual = bikes_avail_now) %>% 
@@ -588,6 +608,8 @@ error_tbl_h2o <-
                   ) 
          }
        )
+
+# error_tbl_h2o$`10` %>% glimpse()
 
 
 # save as a .rds file
@@ -735,7 +757,7 @@ pmap(.l = list(a = valid_data_error_tbl_h2o,
   Remove no-longer-needed files.
 ```{r}
 
-rm(automl_leader, automl_models_h2o, lmtd_vars_lag3, leader_models_varimp, leader_models_varimp_plot, model_path_h2o, pred_h2o, test_h2o, train_h2o, valid_h2o, x, h2o.time, y
+rm(automl_leader, automl_models_h2o, lmtd_vars_lag3, leader_models_varimp, leader_models_varimp_plot, lmtd_vars_lag3, model_path_h2o, pred_h2o, tbl_train, tbl_valid_, tbl_test, test_h2o, train_h2o, valid_h2o, x, h2o.time, y
    )
 
 ```
