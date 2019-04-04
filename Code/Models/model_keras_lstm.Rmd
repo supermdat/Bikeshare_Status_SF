@@ -512,7 +512,7 @@ func_predict_all_splits <-
                        epochs = 100,
                        shuffle = FALSE,
                        # callbacks = callback_early_stopping(patience = 10),
-                       verbose = 0
+                       verbose = 1
                        )
                  }
                )
@@ -526,7 +526,7 @@ func_predict_all_splits <-
                .f = function(a, b, c) {
                  data.frame(keras_lstm_raw = a %>% 
                               predict(b, batch_size = nrow(b)
-                               ),
+                                      ),
                             scale_value = attr(c$scale_info, "scaled:scale")[[1]],
                             center_value = attr(c$scale_info, "scaled:center")[[1]]
                             ) %>% 
@@ -540,6 +540,7 @@ func_predict_all_splits <-
         to_compare = 
           df_tst %>% 
           map(~select(.x,
+                      station_id,
                       time_rnd,
                       bikes_avail_now
                       )
@@ -553,7 +554,7 @@ func_predict_all_splits <-
                  a %>% 
                    bind_cols(b) %>% 
                    mutate(error = bikes_avail_now - keras_lstm_uns_rnd,
-                          error_pct = (error / bikes_avail_now),
+                          error_pct = error / bikes_avail_now,
                           )
                  }
                )
@@ -733,7 +734,7 @@ keras_lstm_mean_mae <-
            mean(na.rm = TRUE) %>% 
            as.data.frame() %>% 
            mutate(station_id = b) %>% 
-           rename(mae_mean = ".")
+           dplyr::rename(mae_mean = ".")
          
          return(single_val)
          }
@@ -758,10 +759,10 @@ saveRDS(keras_lstm_mean_mae,
 
   
 
-keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[10]]$time_rnd %>% min()
-keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[10]]$time_rnd %>% max()
+keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[1]]$time_rnd %>% min()
+keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[1]]$time_rnd %>% max()
 
-keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[10]] %>% 
+keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[1]] %>% 
   gather(
               key = "key",
               value = "value",
@@ -771,16 +772,16 @@ keras_predict_all_stations_all_splits$`10`$actual_vs_pred[[10]] %>%
         ggplot(aes(x = time_rnd, y = value, color = key)) +
         geom_line() +
         coord_cartesian(
-          xlim = c(as_datetime("2014-11-11 00:00:00",
+          xlim = c(as_datetime("2014-05-25 00:00:00",
                                              tz = "America/Los_Angeles"
                                              ),
-                                 as_datetime("2014-11-12 00:00:00",
+                                 as_datetime("2014-05-26 00:00:00",
                                              tz = "America/Los_Angeles"
                                              )
                                  ),
-                        ylim = c(0, 12)
+                        ylim = c(0, 10)
                         ) +
-        scale_y_continuous(breaks = seq(0, 8, 2)) +
+        scale_y_continuous(breaks = seq(0, 10, 2)) +
         theme_minimal() +
         theme(legend.position = "bottom")
 
