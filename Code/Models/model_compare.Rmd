@@ -1,0 +1,359 @@
+---
+title: "SF Bikeshare Status - Comparing Models"
+output: html_notebook
+---
+
+
+**NOTE:** before running this chunk, the AWS Instance Type was switched from t2.micro to t3.2xlarge.
+
+**NOTE:** This should be run before each new model to create the relevant dataset for modeling:  lmtd_vars_lag3.
+
+
+
+## Setup    
+  Load the relevant libraries.
+```{r}
+# {r, message=FALSE, warning=FALSE}
+
+# rm(list = ls())
+# .rs.restartR()
+
+
+library("tidyverse")
+library("data.table")
+library("lubridate")
+
+```
+  
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+
+
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+  
+    
+  Get the relevant data files for the previously built models. These are files holding the actual data values and the model predictions.
+```{r}
+
+#H2O
+error_tbl_h2o <-
+  read_rds(path = paste0(wd,
+                         "/Models/",
+                         "error_tbl_h2o.rds"
+                         )
+           )
+
+
+# Keras LSTM
+keras_predict_all_stations_all_splits <-
+  read_rds(path = paste0(wd,
+                         "/Models/",
+                         "keras_predict_all_stations_all_splits.rds"
+                         )
+           )
+
+
+# Prophet
+mod_prophet <-
+  readRDS(paste0(wd,
+                 "/Models/",
+                 "mod_prophet.Rds"
+                 )
+          )
+
+mod_prophet_error_tbl <-
+  pmap(.l = list(a = mod_prophet),
+       .f = function(a) {
+         error_tbl = a$error_tbl
+         return(error_tbl)
+         }
+       )
+
+rm(mod_prophet)
+
+
+# Baseline (lag 5 minutes)
+mod_lag_05 <-
+  readRDS(paste0(wd,
+                 "/Models/",
+                 "mod_lag_05.Rds"
+                 )
+          )
+  
+```
+  
+    
+  Create a single dataset with actual values and predicted values (from all the models).
+```{r}
+
+all_models_preds <-
+  pmap(.l = list(a = keras_predict_all_stations_all_splits,
+                 b = mod_prophet_error_tbl,
+                 c = error_tbl_h2o,
+                 d = mod_lag_05
+                 ),
+       .f = function(a, b, c, d) {
+         h2o_test_preds = c
+         
+         full_preds =
+           pmap(.l = list(e = a$actual_vs_pred,
+                          f = b,
+                          g = d$lag_5min
+                          ),
+                .f = function(e, f, g) {
+                  keras = e %>% 
+                    select(station_id,
+                           time_rnd,
+                           bikes_avail_now,
+                           keras_lstm_uns,
+                           keras_lstm_uns_rnd
+                           )
+                  
+                  prophet = f %>% 
+                    select(station_id,
+                           time_rnd,
+                           pred,
+                           pred_rnd
+                           ) %>% 
+                    dplyr::rename(prophet = pred,
+                                  prophet_rnd = pred_rnd
+                                  )
+                  
+                  h2o = h2o_test_preds %>%
+                    select(station_id,
+                           time_rnd,
+                           pred
+                           ) %>%
+                    dplyr::rename(h2o = pred) %>%
+                    mutate(h2o_rnd = round(h2o))
+                  
+                  lag_05 = g
+                  
+                  full_data =
+                    keras %>% 
+                    inner_join(y = prophet,
+                               by = c("station_id" = "station_id",
+                                      "time_rnd" = "time_rnd"
+                                      )
+                               ) %>% 
+                    inner_join(y = h2o,
+                               by = c("station_id" = "station_id",
+                                      "time_rnd" = "time_rnd"
+                                      )
+                               ) %>%
+                    inner_join(y = lag_05,
+                               by = c("station_id" = "station_id",
+                                      "time_rnd" = "time_rnd"
+                                      ) 
+                               ) %>% 
+                    select(station_id,
+                           time_rnd,
+                           bikes_avail_now,
+                           keras_lstm_uns_rnd,
+                           prophet_rnd,
+                           h2o_rnd,
+                           lag_05
+                           ) %>% 
+                    dplyr::rename(actual = bikes_avail_now,
+                                  keras = keras_lstm_uns_rnd,
+                                  prophet = prophet_rnd,
+                                  h2o = h2o_rnd
+                                  )
+                  
+                  return(full_data)
+                  }
+                )
+         
+         return(full_preds)
+         }
+       )
+
+
+all_models_preds$`10` %>% map(~filter(.x,
+                                         !is.na(keras) &
+                                           !is.na(prophet) &
+                                           !is.na(h2o)
+                                         ) %>% summary()
+                                 )
+
+all_models_preds$`10` %>% map(~summary(.x)
+                                 )
+
+```
+  
+    
+  Create the basic error statistics (e.g., RMSE, MAE, etc.).
+```{r}
+
+error_stats <-
+  pmap(.l = list(a = all_models_preds
+                 ),
+       .f = function(a) {
+         data = a %>% 
+           bind_rows() %>% 
+           filter(!is.na(keras) &
+                    !is.na(prophet) &
+                    !is.na(h2o) &
+                    !is.na(lag_05)
+                  ) %>%
+           gather(key = "model",
+                  value = "pred",
+                  keras,
+                  prophet,
+                  h2o,
+                  lag_05
+                  ) %>% 
+           mutate(error = actual - pred,
+                  error_pct = error / actual
+                  ) %>% 
+           group_by(station_id,
+                    model
+                    ) %>%
+           dplyr::summarise(me = mean(error, na.rm = TRUE),
+                            rmse = mean(error^2, na.rm = TRUE)^0.5,
+                            mae  = mean(abs(error), na.rm = TRUE),
+                            mape = mean(abs(error_pct), na.rm = TRUE),
+                            mpe  = mean(error_pct, na.rm = TRUE)
+                            ) %>% 
+           ungroup() %>%
+           arrange(station_id,
+                   model
+                   )
+         
+         return(data)
+         }
+       )
+
+# error_stats %>% map(~str(.x))
+# error_stats$`10` %>% View()
+
+# error_stats %>% bind_rows %>% View()
+
+```
+  
+    
+  Plot the MAE for each model, for each station_id.
+```{r}
+
+mae_bar_graph <-
+  error_stats %>% 
+  bind_rows() %>% 
+  ggplot(aes(x = model,
+             y = mae,
+             fill = model
+             )
+         ) +
+  geom_col() +
+  geom_text(aes(label = round(mae, digits = 2)
+                ),
+            hjust = -0.5,
+            size = 3
+            ) +
+  facet_wrap(~station_id) +
+  coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Model Comparison",
+       subtitle = "Mean Absolute Error (MAE)",
+       x = "Model",
+       y = "MAE"
+       ) +
+  NULL
+
+mae_bar_graph
+
+
+ggsave(filename = "mae_bar_graph.png",
+       path = paste0(wd,
+                     "/Viz"
+                     )
+       )
+
+```
+  
+    
+  Plot an example of the actual vs. predictions over time (for a single `station_id` value).
+```{r}
+
+all_models_preds$`10`[[10]] %>%
+  filter(!is.na(keras) &
+           !is.na(prophet) &
+           !is.na(h2o)
+         ) %>% 
+  summarise(min_date = min(time_rnd),
+            max_date = max(time_rnd)
+            )
+
+
+actual_vs_pred_station10_line_graph <-
+  all_models_preds$`10`[[10]] %>%
+  filter(!is.na(keras) &
+           !is.na(prophet) &
+           !is.na(h2o) &
+           !is.na(lag_05)
+         ) %>% 
+  arrange(station_id,
+          time_rnd
+          ) %>% 
+  gather(key = "model",
+         value = "bikes_avail_now",
+         actual,
+         keras,
+         # prophet, # removing prophet because the prediction is so poor it's not worth ploting
+         h2o,
+         lag_05
+         ) %>% 
+  mutate(line_width = case_when(model == "actual" ~ 0.30,
+                                TRUE ~ 0.15
+                                )
+         ) %>% 
+  ggplot(aes(x = time_rnd,
+             y = bikes_avail_now,
+             colour = model,
+             linetype = model
+             )
+         ) +
+  geom_line() +
+  coord_cartesian(xlim = c(as_datetime("2014-11-11 12:00:00"),
+                           as_datetime("2014-11-11 18:00:00")
+                           ),
+                  ylim = c(0, 8)
+                  ) +
+  scale_y_continuous(breaks = seq(0, 8, 2)) +
+  scale_color_manual(values = c("black", "red", "blue", "green")) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  labs(title = "Bike Availability Comparison",
+       subtitle = "Station ID: 10",
+       x = "Time on 2014-11-11 (Tue)",
+       y = "# Bikes Available"
+       ) +
+  NULL
+
+actual_vs_pred_station10_line_graph
+
+```
+
+
