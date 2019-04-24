@@ -1,12 +1,12 @@
 ---
-title: "SF Bikeshare Status - Comparing Models"
+title: "SF Bikeshare Status - Modeling Compare"
 output: html_notebook
 ---
 
 
 **NOTE:** before running this chunk, the AWS Instance Type was switched from t2.micro to t3.2xlarge.
 
-**NOTE:** This should be run before each new model to create the relevant dataset for modeling:  lmtd_vars_lag3.
+**NOTE:** `model_setup.Rmd` should be run first to create the needed datasets for the model comparison.
 
 
 
@@ -18,10 +18,17 @@ output: html_notebook
 # rm(list = ls())
 # .rs.restartR()
 
-
+# data manipulation
 library("tidyverse")
 library("data.table")
 library("lubridate")
+
+
+# plotting graphs as .gif and .mpeg files
+library("gganimate")
+library("gifski")
+library("transformr")
+library("av")
 
 ```
   
@@ -39,7 +46,11 @@ sessionInfo()
 
 require("knitr")
 
-opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+# Use below when running from AWS
+# opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+# Use below when running from laptop
+opts_knit$set(root.dir = "/Users/mdturse/Dropbox/_AWS/Bikeshare_Status_SF/")
 
 ```
   
@@ -54,10 +65,17 @@ wd
 ```
   
     
-  Get the relevant data files for the previously built models. These are files holding the actual data values and the model predictions.
+  Remove unneeded files.
 ```{r}
 
-#H2O
+rm(lmtd_vars_lag3)
+
+```
+  
+    
+  Get the base datasets.
+```{r}
+
 error_tbl_h2o <-
   read_rds(path = paste0(wd,
                          "/Models/",
@@ -66,7 +84,6 @@ error_tbl_h2o <-
            )
 
 
-# Keras LSTM
 keras_predict_all_stations_all_splits <-
   read_rds(path = paste0(wd,
                          "/Models/",
@@ -75,7 +92,6 @@ keras_predict_all_stations_all_splits <-
            )
 
 
-# Prophet
 mod_prophet <-
   readRDS(paste0(wd,
                  "/Models/",
@@ -94,7 +110,6 @@ mod_prophet_error_tbl <-
 rm(mod_prophet)
 
 
-# Baseline (lag 5 minutes)
 mod_lag_05 <-
   readRDS(paste0(wd,
                  "/Models/",
@@ -191,17 +206,39 @@ all_models_preds <-
        )
 
 
-all_models_preds$`10` %>% map(~filter(.x,
-                                         !is.na(keras) &
-                                           !is.na(prophet) &
-                                           !is.na(h2o)
-                                         ) %>% summary()
-                                 )
+all_models_preds$`10` %>% 
+  map(~filter(.x,
+              !is.na(keras) &
+                !is.na(prophet) &
+                !is.na(h2o)
+              ) %>% 
+        summary()
+      )
 
-all_models_preds$`10` %>% map(~summary(.x)
-                                 )
+all_models_preds$`10` %>% 
+  map(~summary(.x)
+      )
 
 ```
+  
+    
+  Basic summary stats of the predictions.
+```{r}
+
+all_models_preds_single_df <-
+  all_models_preds %>% 
+  map(~bind_rows(.x)
+      )
+
+all_models_preds_single_df$`61` %>% 
+  filter(!is.na(keras) &
+           !is.na(prophet) &
+           !is.na(h2o) &
+           !is.na(lag_05)
+         ) %>% 
+  summary()
+
+```  
   
     
   Create the basic error statistics (e.g., RMSE, MAE, etc.).
@@ -213,6 +250,7 @@ error_stats <-
        .f = function(a) {
          data = a %>% 
            bind_rows() %>% 
+           # this filter is needed as not all split-model combinations predict the same data
            filter(!is.na(keras) &
                     !is.na(prophet) &
                     !is.na(h2o) &
@@ -254,7 +292,7 @@ error_stats <-
 ```
   
     
-  Plot the MAE for each model, for each station_id.
+  Plot the MAE for each model, for each station_id, then save the graph.
 ```{r}
 
 mae_bar_graph <-
@@ -266,14 +304,19 @@ mae_bar_graph <-
              )
          ) +
   geom_col() +
-  geom_text(aes(label = round(mae, digits = 2)
+  geom_text(aes(label = format(round(mae,
+                                     digits = 1
+                                     ),
+                               nsmall = 1
+                               )
                 ),
-            hjust = -0.5,
-            size = 3
+            hjust = 0.1,
+            size = 2
             ) +
-  facet_wrap(~station_id) +
+  facet_wrap(~station_id
+             ) +
   coord_flip() +
-  theme_minimal() +
+  theme_bw() +
   theme(legend.position = "none") +
   labs(title = "Model Comparison",
        subtitle = "Mean Absolute Error (MAE)",
@@ -287,14 +330,14 @@ mae_bar_graph
 
 ggsave(filename = "mae_bar_graph.png",
        path = paste0(wd,
-                     "/Viz"
+                     "/Viz/"
                      )
        )
 
 ```
   
     
-  Plot an example of the actual vs. predictions over time (for a single `station_id` value).
+  Plot an example of the actual vs. predictions over time for `station_id` = 10.
 ```{r}
 
 all_models_preds$`10`[[10]] %>%
@@ -341,18 +384,257 @@ actual_vs_pred_station10_line_graph <-
                            ),
                   ylim = c(0, 8)
                   ) +
+  scale_x_datetime(breaks = c(as_datetime("2014-11-11 12:00:00"),
+                              as_datetime("2014-11-11 14:00:00"),
+                              as_datetime("2014-11-11 16:00:00"),
+                              as_datetime("2014-11-11 18:00:00")
+                              ),
+                   date_labels = "%H:%M"
+                   ) +
   scale_y_continuous(breaks = seq(0, 8, 2)) +
   scale_color_manual(values = c("black", "red", "blue", "green")) +
-  theme_minimal() +
+  theme_bw() +
   theme(legend.position = "bottom") +
   labs(title = "Bike Availability Comparison",
        subtitle = "Station ID: 10",
-       x = "Time on 2014-11-11 (Tue)",
+       x = "Time (2014-11-11, Tue)",
        y = "# Bikes Available"
        ) +
   NULL
 
+# actual_vs_pred_station10_line_graph + theme_minimal()
+# actual_vs_pred_station10_line_graph + theme_bw()
 actual_vs_pred_station10_line_graph
+
+
+ggsave(filename = "actual_vs_pred_station10_line_graph.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+```
+  
+    
+  Plot an example of the actual vs. predictions over time for `station_id` = 61.
+```{r}
+
+actual_vs_pred_station61_line_graph <-
+  all_models_preds$`61`[[10]] %>%
+  filter(!is.na(keras) &
+           !is.na(prophet) &
+           !is.na(h2o) &
+           !is.na(lag_05)
+         ) %>% 
+  arrange(station_id,
+          time_rnd
+          ) %>% 
+  gather(key = "model",
+         value = "bikes_avail_now",
+         actual,
+         keras,
+         prophet, # removing prophet because the prediction is so poor it's not worth ploting
+         h2o,
+         lag_05
+         ) %>% 
+  mutate(line_width = case_when(model == "actual" ~ 0.30,
+                                TRUE ~ 0.15
+                                )
+         ) %>% 
+  ggplot(aes(x = time_rnd,
+             y = bikes_avail_now,
+             colour = model,
+             linetype = model
+             )
+         ) +
+  geom_line() +
+  coord_cartesian(xlim = c(as_datetime("2014-11-18 06:00:00",
+                                       tz = "America/Los_Angeles"
+                                       ),
+                           as_datetime("2014-11-18 21:00:00",
+                                       tz = "America/Los_Angeles"
+                                       )
+                           )
+                  ) +
+  scale_x_datetime(date_breaks = "2 hours",
+                   timezone = "America/Los_Angeles",
+                   date_labels = "%H:%M"
+                   ) +
+  scale_color_manual(values = c("black", "red", "blue", "green", "purple")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title = "Bike Availability Comparison",
+       subtitle = "Station ID: 61  (15 hours on Tue, 2014-11-18)",
+       x = "Time",
+       y = "# Bikes Available"
+       ) +
+  NULL
+
+# actual_vs_pred_station10_line_graph + theme_minimal()
+# actual_vs_pred_station10_line_graph + theme_bw()
+actual_vs_pred_station61_line_graph
+
+
+ggsave(filename = "actual_vs_pred_station61_line_graph.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+```
+  
+    
+  Plot an example of the actual vs. predictions over time for `station_id` = 61, then save the result as a .gif (ANIMATED!) file.
+```{r}
+
+actual_vs_pred_station61_line_graph_anim <-
+  all_models_preds$`61`[[10]] %>%
+  filter(!is.na(keras) &
+           !is.na(prophet) &
+           !is.na(h2o) &
+           !is.na(lag_05) &
+           between(x = time_rnd,
+                   lower = as_datetime("2014-11-18 06:00:00",
+                                       tz = "America/Los_Angeles"
+                                       ),
+                   upper = as_datetime("2014-11-18 21:00:00",
+                                       tz = "America/Los_Angeles"
+                                       ),
+                   incbounds = TRUE
+                   )
+         ) %>% 
+  arrange(station_id,
+          time_rnd
+          ) %>% 
+  gather(key = "model",
+         value = "bikes_avail_now",
+         actual,
+         keras,
+         prophet, # removing prophet because the prediction is so poor it's not worth ploting
+         h2o,
+         lag_05
+         ) %>% 
+  mutate(line_width = case_when(model == "actual" ~ 0.30,
+                                TRUE ~ 0.15
+                                )
+         ) %>% 
+  ggplot(aes(x = time_rnd,
+             y = bikes_avail_now,
+             colour = model,
+             linetype = model,
+             group = model
+             )
+         ) +
+  geom_line() +
+  scale_x_datetime(date_breaks = "2 hours",
+                   timezone = "America/Los_Angeles",
+                   date_labels = "%H:%M"
+                   ) +
+  scale_color_manual(values = c("black", "red", "blue", "green", "purple")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title = "Bike Availability Comparison",
+       subtitle = "Station ID: 61  (15 hours on Tue, 2014-11-18)",
+       x = "Time",
+       y = "# Bikes Available"
+       ) +
+  NULL
+
+
+actual_vs_pred_station61_line_graph_anim
+
+actual_vs_pred_station61_line_graph_anim +
+  transition_reveal(time_rnd) +
+  # ease_aes("linear") +
+  ease_aes("cubic-in-out")
+
+
+anim_save(filename = "actual_vs_pred_station61_line_graph_anim.gif",
+          path = paste0(wd,
+                        "/Viz/"
+                        )
+          )
+
+
+```
+  
+    
+  Plot an example of the actual vs. predictions over time for `station_id` = 61, then save the result as a .mpeg (VIDEO!) file.
+```{r}
+
+actual_vs_pred_station61_line_graph_mpeg <-
+  all_models_preds$`61`[[10]] %>%
+  filter(!is.na(keras) &
+           !is.na(prophet) &
+           !is.na(h2o) &
+           !is.na(lag_05) &
+           between(x = time_rnd,
+                   lower = as_datetime("2014-11-18 06:00:00",
+                                       tz = "America/Los_Angeles"
+                                       ),
+                   upper = as_datetime("2014-11-18 21:00:00",
+                                       tz = "America/Los_Angeles"
+                                       ),
+                   incbounds = TRUE
+                   )
+         ) %>% 
+  arrange(station_id,
+          time_rnd
+          ) %>% 
+  gather(key = "model",
+         value = "bikes_avail_now",
+         actual,
+         keras,
+         prophet, # removing prophet because the prediction is so poor it's not worth ploting
+         h2o,
+         lag_05
+         ) %>% 
+  mutate(line_width = case_when(model == "actual" ~ 0.30,
+                                TRUE ~ 0.15
+                                )
+         ) %>% 
+  ggplot(aes(x = time_rnd,
+             y = bikes_avail_now,
+             colour = model,
+             linetype = model,
+             group = model
+             )
+         ) +
+  geom_line() +
+  scale_x_datetime(date_breaks = "2 hours",
+                   timezone = "America/Los_Angeles",
+                   date_labels = "%H:%M"
+                   ) +
+  scale_color_manual(values = c("black", "red", "blue", "green", "purple")) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title = "Bike Availability Comparison",
+       subtitle = "Station ID: 61  (15 hours on Tue, 2014-11-18)",
+       x = "Time",
+       y = "# Bikes Available"
+       ) +
+  NULL
+
+
+actual_vs_pred_station61_line_graph_mpeg
+
+
+actual_vs_pred_station61_line_graph_mpeg <-
+  actual_vs_pred_station61_line_graph_mpeg +
+  transition_reveal(time_rnd) +
+  ease_aes("linear")
+  
+
+animate(actual_vs_pred_station61_line_graph_mpeg,
+        renderer = av_renderer()
+        )
+
+
+anim_save(filename = "actual_vs_pred_station61_line_graph_mpeg.mpeg",
+          path = paste0(wd,
+                        "/Viz/"
+                        )
+          )
 
 ```
 
