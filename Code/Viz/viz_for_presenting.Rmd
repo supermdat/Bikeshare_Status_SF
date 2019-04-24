@@ -1,0 +1,1064 @@
+---
+title: "SF Bikeshare Status - Viz for Presentation to Transportation Techies Bike Hack Night X"
+output: html_notebook
+---
+
+
+**NOTE:** before running this chunk, the AWS Instance Type was switched from t2.micro to t3.2xlarge.
+
+**NOTE:** `model_setup.Rmd` should be run first to create the needed datasets for creation of the viz.
+
+
+
+## Setup  
+  Load the relevant libraries.
+```{r}
+# {r, message=FALSE, warning=FALSE}
+
+# rm(list = ls())
+# .rs.restartR()
+
+
+library("tidyverse")
+library("data.table")
+library("lubridate")
+library("ggmap")
+library("gganimate")
+library("gifski")
+library("transformr")
+library("av")
+
+
+library("DBI")
+# install.packages("RSQLite")
+library("RSQLite")
+
+```
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+  
+    
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+# Use below when running from AWS
+# opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+# Use below when running from laptop
+opts_knit$set(root.dir = "/Users/mdturse/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+    
+    
+  Remove unneeded files.
+```{r}
+
+rm(lmtd_vars_lag3)
+
+```
+
+
+## Create Line Graphs of Bike Availability Over Time
+    
+  Individual line graph for each station - uses all available data (aproximately 2 years).
+```{r}
+
+dates <-
+  small_test %>% 
+  map(~summarise(.x,
+                 date_min = as_date(min(time_rnd, na.rm = TRUE)),
+                 date_max = as_date(max(time_rnd, na.rm = TRUE))
+                 ) %>% 
+        mutate(days = as.numeric(date_max - date_min),
+               years = format(round(days / 365.15,
+                                    digits = 1
+                                    ),
+                              nsmall = 1
+                              )
+               ) %>% 
+        pull(years)
+      )
+
+# dates$`10`
+
+
+all_dates <-
+  pmap(.l = list(a = small_test,
+               b = names(small_test),
+               c = dates
+               ),
+     .f = function(a, b, c) {
+       data = a %>% select(time_rnd, bikes_avail_now)
+       
+       data %>% 
+         ggplot(aes(x = time_rnd,
+                    y = bikes_avail_now
+                    )
+                ) +
+         geom_line(color = "blue") +
+         theme_bw() +
+         labs(title = "Bike Availability",
+              subtitle = paste0("Station ID: ", b, "  (", c, " years of data)"),
+              x = "Date",
+              y = "# Bikes Available"
+              )
+       }
+     )
+
+
+all_dates
+
+
+pmap(.l = list(a = all_dates,
+               b = names(all_dates)
+               ),
+     .f = function(a, b) {
+       ggsave(plot = a,
+              filename = paste0("bikes_avail_01_", b, "_all_dates.png"),
+              path = paste0(wd,
+                            "/Viz/"
+                            )
+              )
+       }
+     )
+
+```
+  
+    
+  Faceted line graph for each station - uses all available data (aproximately 2 years).
+```{r}
+
+all_dates_facet <-
+  small_test %>% 
+  bind_rows() %>% 
+  select(station_id, time_rnd, bikes_avail_now) %>% 
+  ggplot(aes(x = time_rnd,
+             y = bikes_avail_now
+                    )
+         ) +
+  geom_line() +
+  facet_wrap(~station_id) +
+theme_bw() +
+  labs(title = "Bike Availability",
+       subtitle = "By Station ID",
+       x = "Date",
+       y = "# Bikes Available"
+       )
+
+
+
+all_dates_facet
+
+
+ggsave(plot = all_dates_facet,
+       filename = "all_dates_facet.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+```
+  
+  Faceted line graph for each station, colored by station - uses all available data (aproximately 2 years). **NOTE:** It takes considerable time to create the .gif file because of the amount of data involved.
+```{r}
+
+all_dates_facet_color <-
+  small_test %>% 
+  bind_rows() %>% 
+  select(station_id, time_rnd, bikes_avail_now) %>% 
+  ggplot(aes(x = time_rnd,
+             y = bikes_avail_now,
+             colour = station_id
+             )
+         ) +
+  geom_line() +
+  facet_wrap(~station_id) +
+theme_bw() +
+  labs(title = "Bike Availability",
+       subtitle = "By Station ID  (2 years of data)",
+       x = "Date",
+       y = "# Bikes Available"
+       ) +
+  theme(legend.position = "none") +
+  NULL
+
+
+
+all_dates_facet_color
+
+ggsave(plot = all_dates_facet_color,
+       filename = "all_dates_facet_color.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+
+# Also save a .gif version
+all_dates_facet_color +
+  transition_reveal(time_rnd) +
+  ease_aes("linear")
+
+anim_save(filename = "all_dates_facet_color.gif",
+          path = paste0(wd,
+                        "/Viz/"
+                        )
+          )
+
+```
+  
+    
+  Line graphs for each station, colored by station, overlayed in a single graph - uses all available data (aproximately 2 years). **NOTE:** This looks messy and is not worth saving.
+```{r}
+
+all_dates_combo <-
+  small_test %>% 
+  bind_rows() %>% 
+  select(station_id, time_rnd, bikes_avail_now) %>% 
+  ggplot(aes(x = time_rnd,
+             y = bikes_avail_now,
+             colour = station_id
+             )
+         ) +
+  geom_line() +
+  theme_bw() +
+  labs(title = "Bike Availability",
+       subtitle = "By Station ID",
+       x = "Date",
+       y = "# Bikes Available"
+       ) +
+  theme(legend.position = "none") +
+  NULL
+
+
+
+all_dates_combo
+
+
+# ggsave(plot = all_dates_combo,
+#        filename = "all_dates_combo.png",
+#        path = paste0(wd,
+#                      "/Viz/"
+#                      )
+#        )
+
+```
+  
+    
+  Graph one week of data - one graph per station.
+```{r}
+
+one_week <-
+  pmap(.l = list(a = small_test,
+               b = names(small_test)
+               ),
+     .f = function(a, b) {
+       data = a %>% select(time_rnd, bikes_avail_now)
+       
+       data %>% 
+         ggplot(aes(x = time_rnd,
+                    y = bikes_avail_now
+                    )
+                ) +
+         geom_line(color = "blue") +
+         coord_cartesian(xlim = c(as_datetime("2014-11-17 00:00:00", # Monday
+                                              tz = "America/Los_Angeles"
+                                              ),
+                                  as_datetime("2014-11-24 00:00:00", # Monday
+                                              tz = "America/Los_Angeles"
+                                              )
+                                  )
+                         ) +
+         theme_bw() +
+         labs(title = "Bike Availability",
+              subtitle = paste0("Station ID: ", b, "  (1 week of data)"),
+              x = "Date",
+              y = "# Bikes Available"
+              )
+       }
+     )
+
+
+one_week
+
+
+pmap(.l = list(a = one_week,
+               b = names(one_week)
+               ),
+     .f = function(a, b) {
+       ggsave(plot = a,
+              filename = paste0("bikes_avail_02_", b, "_1_week.png"),
+              path = paste0(wd,
+                            "/Viz/"
+                            )
+              )
+       }
+     )
+
+```
+  
+    
+  Animate one week of data, just for `station_id` = 61.
+```{r}
+
+one_week_anim <-
+  pmap(.l = list(a = small_test,
+               b = names(small_test)
+               ),
+     .f = function(a, b) {
+       data = a %>% 
+         select(time_rnd, bikes_avail_now) %>% 
+         filter(between(x = time_rnd,
+                        lower = as_datetime("2014-11-17 00:00:00", # Monday
+                                            tz = "America/Los_Angeles"
+                                            ),
+                        upper = as_datetime("2014-11-24 00:00:00", # Monday
+                                            tz = "America/Los_Angeles"
+                                            ),
+                        incbounds = TRUE
+                        )
+                )
+       
+       data %>% 
+         ggplot(aes(x = time_rnd,
+                    y = bikes_avail_now
+                    )
+                ) +
+         geom_line() +
+         coord_cartesian(ylim = c(0, 30)) +
+         scale_y_continuous(breaks = c(0, 5, 10, 15, 20, 25, 30)
+                            ) +
+         
+         theme_bw() +
+         labs(title = "Bike Availability",
+              subtitle = paste0("Station ID: ", b, "  (1 week of data)"),
+              x = "Date",
+              y = "# Bikes Available"
+              )
+       }
+     )
+
+
+one_week_anim
+
+one_week_anim$`61` +
+  transition_reveal(time_rnd) +
+  ease_aes("linear")
+
+anim_save(filename = "anim_one_week_61.gif",
+          path = paste0(wd,
+                        "/Viz/"
+                        )
+          )
+
+```
+  
+    
+  Animate one week of data, faceted and colored by each `station_id` value.
+```{r}
+
+one_week_facet_anim <-
+  small_test %>% 
+  bind_rows() %>% 
+  select(station_id, time_rnd, bikes_avail_now) %>% 
+  filter(between(x = time_rnd,
+                 lower = as_datetime("2014-11-17 00:00:00", # Monday
+                                     tz = "America/Los_Angeles"
+                                     ),
+                 upper = as_datetime("2014-11-24 00:00:00", # Monday
+                                     tz = "America/Los_Angeles"
+                                     ),
+                 incbounds = TRUE
+                 )
+         ) %>% 
+  ggplot(aes(x = time_rnd,
+           y = bikes_avail_now,
+           colour = station_id
+           )
+                ) +
+  geom_line() +
+  facet_wrap(~station_id) +
+  theme_bw() +
+         labs(title = "Bike Availability",
+              subtitle = "By Station ID  (1 week of data)",
+              x = "Date",
+              y = "# Bikes Available"
+              ) +
+  theme(legend.position = "none")
+
+
+one_week_facet_anim
+
+one_week_facet_anim +
+  transition_reveal(time_rnd) +
+  ease_aes("linear")
+
+
+anim_save(filename = "one_week_facet_anim.gif",
+          path = paste0(wd,
+                        "/Viz/"
+                        )
+          )
+
+```
+  
+    
+  Graph two days of data, one graph for each `station_id` value.
+```{r}
+
+two_days <-
+  pmap(.l = list(a = small_test,
+               b = names(small_test)
+               ),
+     .f = function(a, b) {
+       data = a %>% select(time_rnd, bikes_avail_now)
+       
+       data %>% 
+         ggplot(aes(x = time_rnd,
+                    y = bikes_avail_now
+                    )
+                ) +
+         geom_line(color = "blue") +
+         # All Tue & all Wed
+         coord_cartesian(xlim = c(as_datetime("2014-11-18 00:00:00",
+                                              tz = "America/Los_Angeles"
+                                              ),
+                                  as_datetime("2014-11-20 00:00:00",
+                                              tz = "America/Los_Angeles"
+                                              )
+                                  )
+                         ) +
+         theme_bw() +
+         labs(title = "Bike Availability",
+              subtitle = paste0("Station ID: ", b, "  (2 days of data)"),
+              x = "Date & Time",
+              y = "# Bikes Available"
+              )
+       }
+     )
+
+
+two_days
+
+
+pmap(.l = list(a = two_days,
+               b = names(two_days)
+               ),
+     .f = function(a, b) {
+       ggsave(plot = a,
+              filename = paste0("bikes_avail_03_", b, "_2_days.png"),
+              path = paste0(wd,
+                            "/Viz/"
+                            )
+              )
+       }
+     )
+
+```
+  
+    
+  Animate two days of data, just for `station_id` = 61.
+```{r}
+
+two_days_anim <-
+  pmap(.l = list(a = small_test,
+               b = names(small_test)
+               ),
+     .f = function(a, b) {
+       data = a %>% 
+         select(station_id, time_rnd, bikes_avail_now) %>% 
+         # All Tue and all Wed
+         filter(between(x = time_rnd,
+                        lower = as_datetime("2014-11-18 00:00:00",
+                                              tz = "America/Los_Angeles"
+                                              ),
+                        upper = as_datetime("2014-11-20 00:00:00",
+                                              tz = "America/Los_Angeles"
+                                              ),
+                        incbounds = TRUE
+                        )
+                )
+       
+       data %>% 
+         ggplot(aes(x = time_rnd,
+                    y = bikes_avail_now
+                    )
+                ) +
+         geom_line(color = "blue") +
+         theme_bw() +
+         labs(title = "Bike Availability",
+              subtitle = paste0("Station ID: ", b, "  (2 days of data)"),
+              x = "Date & Time",
+              y = "# Bikes Available"
+              ) +
+         theme(legend.position = "none") +
+         NULL
+       }
+     )
+
+
+two_days_anim
+
+two_days_61_anim <-
+  two_days_anim$`61` +
+  transition_reveal(time_rnd) +
+  ease_aes("linear")
+
+two_days_61_anim
+
+
+# animate as a .gif
+anim_save(filename = "two_days_61_anim.gif",
+          path = paste0(wd,
+                        "/Viz/"
+                        )
+          )
+  
+
+# animate as a .mpeg
+animate(two_days_61_anim,
+        renderer = av_renderer()
+        )
+
+
+anim_save(filename = "two_days_61_anim.mpeg",
+          path = paste0(wd,
+                        "/Viz/"
+                        )
+          )
+
+```
+  
+    
+  Graph one day of data, one graph for each `station_id` value.
+```{r}
+
+one_day <-
+  pmap(.l = list(a = small_test,
+               b = names(small_test)
+               ),
+     .f = function(a, b) {
+       data = a %>% select(time_rnd, bikes_avail_now)
+       
+       data %>% 
+         ggplot(aes(x = time_rnd,
+                    y = bikes_avail_now
+                    )
+                ) +
+         geom_line(color = "blue") +
+         # All Tue
+         coord_cartesian(xlim = c(as_datetime("2014-11-18 00:00:00",
+                                              tz = "America/Los_Angeles"
+                                              ),
+                                  as_datetime("2014-11-19 00:00:00",
+                                              tz = "America/Los_Angeles"
+                                              )
+                                  )
+                         ) +
+         theme_bw() +
+         labs(title = "Bike Availability",
+              subtitle = paste0("Station ID: ", b, "  (1 day of data)"),
+              x = "Date & Time",
+              y = "# Bikes Available"
+              )
+       }
+     )
+
+
+one_day
+
+
+pmap(.l = list(a = one_day,
+               b = names(one_day)
+               ),
+     .f = function(a, b) {
+       ggsave(plot = a,
+              filename = paste0("bikes_avail_04_", b, "_1_day.png"),
+              path = paste0(wd,
+                            "/Viz/"
+                            )
+              )
+       }
+     )
+
+```
+  
+    
+  Graph 15 hours of data, one graph per `station_id` value.
+```{r}
+
+fifteen_hours <-
+  pmap(.l = list(a = small_test,
+               b = names(small_test)
+               ),
+     .f = function(a, b) {
+       data = a %>% select(time_rnd, bikes_avail_now)
+       
+       data %>% 
+         ggplot(aes(x = time_rnd,
+                    y = bikes_avail_now
+                    )
+                ) +
+         geom_line(color = "blue") +
+         theme_bw() +
+         # 15 hours on Tue
+         coord_cartesian(xlim = c(as_datetime("2014-11-18 06:00:00",
+                                              tz = "America/Los_Angeles"
+                                              ),
+                                  as_datetime("2014-11-18 21:00:00",
+                                              tz = "America/Los_Angeles"
+                                              )
+                                  )
+                         ) +
+         labs(title = "Bike Availability",
+              subtitle = paste0("Station ID: ", b, "  (15 hours of data)"),
+              x = "Date & Time",
+              y = "# Bikes Available"
+              )
+       }
+     )
+
+
+fifteen_hours
+
+
+pmap(.l = list(a = fifteen_hours,
+               b = names(fifteen_hours)
+               ),
+     .f = function(a, b) {
+       ggsave(plot = a,
+              filename = paste0("bikes_avail_05_", b, "_15_hours.png"),
+              path = paste0(wd,
+                            "/Viz/"
+                            )
+              )
+       }
+     )
+
+
+```
+
+
+## Create Maps of Station Locations  
+    
+  Get the data from the SqlLite database.
+```{r}
+
+# connect to the sqlite database
+con <- dbConnect(SQLite(),
+                 paste0(wd,
+                        "/Data/Raw/",
+                        "database.sqlite"
+                        )
+                 )
+
+# get a list of the talbles
+as.data.frame(dbListTables(con))
+
+# get data for every 5 minutes
+myQuery <- dbSendQuery(con,
+                       "Select          *
+                        From            status
+                          Where         (     time like '%:_0:__'
+                                          or  time like '%:_5:__'
+                                         )
+                       "
+                       )
+
+sf_status <-
+  dbFetch(myQuery, n = -1) %>% 
+  as.data.table
+
+class(sf_status)
+glimpse(sf_status)
+object.size(sf_status)
+summary(sf_status)
+sf_status %>% select(station_id) %>% distinct() %>% nrow()
+
+dbClearResult(myQuery)
+
+# View(sf_status %>% head(500))
+```
+  
+    
+  For testing purposes, select only six `station_id` values - the two most frequently used stations, the two least frequently used stations, and two in the middle.
+```{r}
+
+avg_bikes_available <-
+  sf_status[ ,
+            .(bike_avail_cnt = .N,
+              bike_avail_avg = mean(bikes_available, na.rm = TRUE)
+              ),
+            by = station_id
+            ][order(bike_avail_cnt,
+                    bike_avail_avg
+                    )
+              ][ , row_num := row_number(bike_avail_cnt)]
+
+# View(avg_bikes_available)
+
+station_id_2top <- # 22 & 61
+  avg_bikes_available %>% 
+  top_n(n = 2,
+        wt = row_num
+        ) %>% 
+  pull(station_id)
+
+station_id_2bot <- # 84 & 83
+  avg_bikes_available %>% 
+  top_n(n = -2,
+        wt = row_num
+        ) %>% 
+  pull(station_id)
+
+station_id_2mid <- # 10 & 21
+  avg_bikes_available %>% 
+  filter(row_num == nrow(avg_bikes_available) / 2 |
+           row_num == (nrow(avg_bikes_available) / 2) + 1
+         ) %>% 
+  pull(station_id)
+
+station_id_select <-
+  c(station_id_2top, station_id_2bot, station_id_2mid)
+
+station_id_select
+
+
+rm(station_id_2top, station_id_2bot, station_id_2mid, sf_status, station_id_select)
+
+```
+  
+    
+  Get the data from the SqlLite database for stations.
+```{r}
+
+# connect to the sqlite database
+con <- dbConnect(SQLite(),
+                 paste0(wd,
+                        "/Data/Raw/",
+                        "database.sqlite"
+                        )
+                 )
+
+# get a list of the talbles
+as.data.frame(dbListTables(con))
+
+# get data for stations
+myQuery <- dbSendQuery(con,
+                       "Select        *
+                        From          station
+                        Where         id in (22, 61, 84, 83, 10, 21)
+                       "
+                       )
+
+sf_stations <-
+  dbFetch(myQuery, n = -1) %>% 
+  mutate(avg_bikes_avail_group = case_when(id == 22 | id == 61 ~ "most",
+                                           id == 84 | id == 83 ~ "least",
+                                           id == 10| id == 21 ~ "middle"
+                                           ),
+         station_and_group = paste0(id, "_", avg_bikes_avail_group)
+         )
+
+class(sf_stations)
+glimpse(sf_stations)
+object.size(sf_stations)
+summary(sf_stations)
+
+dbClearResult(myQuery)
+
+# View(sf_stations %>% arrange(lat, long))
+
+
+rm(con, myQuery)
+
+```
+  
+    
+  Map all six `station_id` values.
+```{r}
+
+stations <- sf_stations %>% 
+  select(long, lat)
+
+
+register_google(key = "--ADD YOUR GOOGLE API KEY HERE--")
+
+map <-
+  get_googlemap(center = c(long = -122.185141, lat = 37.562057), # SF Bay
+                zoom = 10,
+                maptype = "roadmap"
+                )
+
+map_all_stations <-
+  ggmap(map) +
+  geom_label(data = sf_stations,
+            aes(x = long,
+                y = lat,
+                label = station_and_group,
+                fill = avg_bikes_avail_group
+                ),
+            colour = "white",
+            fontface = "bold"
+            ) +
+  labs(title = "Postion of Analyzed Stations",
+       subtitle = "Entire Bay Area",
+       x = "Longitude",
+       y = "Latitude"
+       ) +
+  theme(legend.position = "none") +
+  NULL
+
+
+map_all_stations
+
+
+ggsave(filename = "map_all_stations.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+
+```
+  
+    
+  Map just San Francisco stations:  1 most.
+```{r warning=FALSE}
+
+sf <-
+  sf_stations %>% 
+  filter(id == 61)
+
+
+map <-
+  get_googlemap(center = c(long = sf$long, lat = sf$lat), # SF Bay
+                zoom = 15,
+                maptype = "roadmap"
+                )
+
+map_sf <-
+  ggmap(map) +
+  geom_label(data = sf_stations,
+            aes(x = long,
+                y = lat,
+                label = station_and_group,
+                fill = avg_bikes_avail_group
+                ),
+            colour = "white",
+            fontface = "bold"
+            ) +
+  theme(legend.position = "none") +
+  labs(title = "Postion of Analyzed Stations",
+       subtitle = "San Francisco",
+       x = "Longitude",
+       y = "Latitude"
+       ) +
+  theme(legend.position = "none") +
+  NULL
+
+
+map_sf
+
+
+ggsave(filename = "map_sf.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+```
+  
+    
+  Map just Redwood City: 1 most, 1 middle, 1 least.
+```{r warning=FALSE}
+
+rc <-
+  sf_stations %>% 
+  filter(id == 22)
+
+
+map <-
+  get_googlemap(center = c(long = rc$long, lat = rc$lat), # SF Bay
+                zoom = 15,
+                maptype = "roadmap"
+                )
+
+map_rc <-
+  ggmap(map) +
+  geom_label(data = sf_stations,
+            aes(x = long,
+                y = lat,
+                label = station_and_group,
+                fill = avg_bikes_avail_group
+                ),
+            colour = "white",
+            fontface = "bold"
+            ) +
+  theme(legend.position = "none") +
+  labs(title = "Postion of Analyzed Stations",
+       subtitle = "Redwood City",
+       x = "Longitude",
+       y = "Latitude"
+       ) +
+  theme(legend.position = "none") +
+  NULL
+
+
+map_rc
+
+
+ggsave(filename = "map_rc.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+```
+  
+    
+  Map just San Jose: 1 middle & 1 least.
+```{r warning=FALSE}
+
+sj <-
+  sf_stations %>% 
+  filter(id == 10)
+
+
+map <-
+  get_googlemap(center = c(long = sj$long, lat = sj$lat), # SF Bay
+                zoom = 15,
+                maptype = "roadmap"
+                )
+
+map_sj <-
+  ggmap(map) +
+  geom_label(data = sf_stations,
+            aes(x = long,
+                y = lat,
+                label = station_and_group,
+                fill = avg_bikes_avail_group
+                ),
+            colour = "white",
+            fontface = "bold"
+            ) +
+  theme(legend.position = "none") +
+  labs(title = "Postion of Analyzed Stations",
+       subtitle = "San Jose",
+       x = "Longitude",
+       y = "Latitude"
+       ) +
+  theme(legend.position = "none") +
+  NULL
+
+
+map_sj
+
+
+ggsave(filename = "map_sj.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+```
+
+
+## Create a Cleaner Plot of Variable Importance From H2O (for Statin_Id = 61)  
+  
+  Load up H2O files.
+```{r}
+
+automl_models_h2o <-
+  read_rds(path = paste0(wd,
+                         "/Models/",
+                         "automl_models_h2o.rds"
+                         )
+           )
+
+names(automl_models_h2o)
+library("h2o")
+h2o.init()
+
+```
+  
+    
+  H2O Created Variable Importance Plot, for `station_id` = 61.
+```{r}
+
+leader_models_varimp <-
+  pmap(.l = list(a = automl_models_h2o),
+       .f = function(a) {
+         h2o.varimp(object = a@leader)
+         }
+       )
+
+# leader_models_varimp_plot <-
+#   pmap(.l = list(a = automl_models_h2o),
+#        .f = function(a) {
+#          h2o.varimp_plot(model = a@leader, num_of_features = 10)
+#          }
+#        )
+
+leader_models_varimp$`61`
+h2o.varimp_plot(model = automl_models_h2o$`61`@leader, num_of_features = 10)
+
+```
+  
+    
+  Manually produced variable importance plot for `station_id` = 61.
+```{r}
+
+leader_models_varimp$`61` %>% 
+  as.data.frame() %>% 
+  head(10) %>% 
+  arrange(desc(variable)) %>% 
+  ggplot(aes(x = reorder(variable, scaled_importance),
+             y = scaled_importance
+             )
+         ) +
+    geom_col(fill = "blue") +
+  geom_text(aes(label = format(round(scaled_importance,
+                                     digits = 2
+                                     ),
+                               nsmall = 2
+                               )
+                ),
+            hjust = -0.05,
+            size = 3
+            ) +
+    coord_flip() +
+    theme_bw() +
+  labs(title = "Variable Importance (GBM)",
+       subtitle = "Station ID:  61",
+       x = "Variable",
+       y = "Scaled Importance"
+       ) +
+    NULL
+  
+
+ggsave(filename = "var_imp_plot_61.png",
+       path = paste0(wd,
+                     "/Viz/"
+                     )
+       )
+
+```
+
