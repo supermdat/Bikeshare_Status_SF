@@ -39,7 +39,11 @@ sessionInfo()
 
 require("knitr")
 
-opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+# Use below when running from AWS
+# opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+# Use below when running from laptop
+opts_knit$set(root.dir = "/Users/mdturse/Dropbox/_AWS/Bikeshare_Status_SF/")
 
 ```
   
