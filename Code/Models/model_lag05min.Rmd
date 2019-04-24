@@ -1,0 +1,274 @@
+---
+title: "Step 04: Models - Lag 5min Model"
+output:
+  html_document:
+    df_print: paged
+---
+  
+## Setup    
+  Load the relevant libraries.
+```{r, message=FALSE, warning=FALSE}
+
+# rm(list = ls())
+# .rs.restartR()
+
+# data manipulation
+library("plyr")
+library("tidyverse")
+library("magrittr")
+
+# other
+library("rsample")            # rolling samples for validation stats
+
+```
+  
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+  
+    
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+opts_knit$set(root.dir = "/home/rstudio/Dropbox/_AWS/Bikeshare_Status_SF/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+
+
+## Modeling
+
+**NOTE: `period_train`, `period_test`, and `skip_span`, are the outputs produced in Step 02 and Step 03**
+```{r}
+
+period_train <- # (12 * 24 * 365 * 0.5) # 0.5 years of training data
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "period_train.Rds"
+                 )
+          )
+
+period_test <- # (12 * 24 * 365 * 0.25) # 0.25 years of testing data
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "period_test.Rds"
+                 )
+          )
+
+skip_span <- # (12 * 24 * 25) # gives 10 evenly distributed  splits
+  readRDS(paste0(wd,
+                 "/Data/Interim/",
+                 "skip_span.Rds"
+                 )
+          )
+
+```  
+  
+    
+  Creating the datasets used in modeling.
+```{r}
+
+message("small_test")
+names(small_test)
+small_test$`10` %>% class()
+small_test$`10` %>% glimpse()
+
+
+
+train_data <-
+  small_test %>% 
+  map(~filter(.x, data_type == "01_train"))
+
+message("train_data")
+train_data %>% 
+  map(~dim(.x))
+
+
+rm(lmtd_vars_lag3)
+
+```
+
+
+### Setup for Models Not in `caret` 
+  
+  This is based on the example shown [here](https://topepo.github.io/rsample/articles/Applications/Time_Series.html), and is needed for the time-series-ish models, which are not currently part of the `caret` modeling process.
+    
+  Create the rolling-origin resamples to be used for measuring forecast accuracy. Rolling samples will use 0.5 years of data do predict the next 0.25 years of data.  
+```{r}
+
+roll_rs <-
+  train_data %>% 
+  map(~ rolling_origin(.x,
+                       initial = period_train,
+                       assess = period_test,
+                       cumulative = FALSE,
+                       skip = skip_span
+                       )
+      )
+
+message("train_data")
+# DV_train_data %>% 
+train_data %>% 
+  map(~ nrow(.x)
+      )
+  
+message("roll_rs")
+roll_rs %>% 
+  map(~ dim(.x)
+      )
+
+names(roll_rs$`10`)
+
+roll_rs %>% 
+  map(~ length(.x$splits)
+      )
+
+```
+  
+    
+  For plotting, let’s index each split by the first day of the assessment set.
+```{r}
+
+get_date <-
+  function(x)
+    min(assessment(x)$time_rnd
+        )
+
+roll_rs <-
+  pmap(.l = list(a = roll_rs),
+       .f = function(a) {
+         data = a
+         
+         splits = data$splits %>% 
+           map(get_date)
+         
+         data$start_date = do.call("c", splits)
+         
+         return(data)
+         }
+       )
+
+names(roll_rs$`10`)
+length(roll_rs$`10`$start_date)
+head(roll_rs$`10`$start_date, 20)
+
+
+rm(get_date)
+
+```
+
+
+### Model Setup
+  
+  Here I create the function to run the basic lag1 (e.g., lag of 5 min) model to use as a baseline.
+```{r}
+
+fit_model_lag_05min <-
+  function(x, ...) {
+    
+    # Run just for the test data (for comparison with other models)
+        df_tst = assessment(x)
+        
+        lag_5min =
+          df_tst %>% 
+          select(station_id,
+                 time_rnd,
+                 bikes_avail_now,
+                 bikes_avail_lag05
+                 ) %>% 
+          dplyr::rename(actual = bikes_avail_now,
+                        lag_05 = bikes_avail_lag05
+                        )
+    
+        return(lag_5min)
+  }
+
+```
+
+
+### Run Models
+
+#### Arima-Based Model  
+  
+    
+  Here I run the basic lag model.
+```{r}
+
+# user  system elapsed 
+#   0.552   0.032   0.589 
+start <- proc.time()
+mod_lag_05 <-
+  pmap(.l = list(a = roll_rs),
+       .f = function(a) {
+
+         splits_p = a$splits %>%
+           map(fit_model_lag_05min)
+
+         a$lag_5min = splits_p
+
+         return(a)
+         }
+       )
+
+time.lag_05 <- proc.time() - start
+time.lag_05
+
+
+saveRDS(mod_lag_05,
+        paste0(wd,
+               "/Models/",
+               "mod_lag_05.Rds"
+               )
+        )
+
+# mod_lag_05 <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "mod_lag_05.Rds"
+#                  )
+#           )
+
+
+saveRDS(time.lag_05,
+        paste0(wd,
+               "/Models/",
+               "time.lag_05.Rds"
+               )
+        )
+
+# time.lag_05 <-
+#   readRDS(paste0(wd,
+#                  "/Models/",
+#                  "time.lag_05.Rds"
+#                  )
+#           )
+
+
+rm(roll_rs)
+
+```
+  
+    
+  Remove no-longer-needed files.
+```{r}
+
+rm(small_test, train_data, period_test, period_train, skip_span, start, fit_model_lag_05min)
+
+```
+
+
